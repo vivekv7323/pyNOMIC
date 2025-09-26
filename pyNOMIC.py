@@ -95,7 +95,11 @@ class FileInfoHighPass(object):
         
         # Check if correct object
         if not skip_target_check:
-            object = hdul[0].header['OBJNAME']
+            try:
+                object = hdul[0].header['OBJNAME']
+            except:
+                print(file)
+                raise ValueError("OBJNAME header not found")
             if object != obj:
                 raise ValueError("Object in header does not match given object")
         '''        
@@ -112,7 +116,10 @@ class FileInfoHighPass(object):
         ncoadds = hdul[0].header['NCOADDS']
         #nod_pos, dettemp, nomiccfw not found
         '''
-        chop = hdul[0].header['CHOP_POS']
+        try:
+            chop = hdul[0].header['CHOP_POS']
+        except:
+            chop = ""
 
         para_angle = hdul[0].header['LBT_PARA']
 
@@ -285,8 +292,8 @@ class EvaluateFrames(object):
 # FUNCTIONS
 #----------------------------------------
 
-def combine(obj, raw_dir, master_badmap_dir, combn, side, testing=False, test_number=None, start_frame=0,\
-            end_frame = 99e9, skip_target_check=False,background_limit = 28000, threadcount=500):
+def combine(obj, raw_dir, master_badmap_dir, combn, side, testing=False, test_number=None, start_frame=None,\
+            end_frame = None, skip_target_check=False,background_limit = 28000, threadcount=500):
 
     master_badmap = (fits.open(master_badmap_dir))[0].data
     master_badmap[:,:3] = 0
@@ -556,7 +563,7 @@ def frame_registration(files, subtracted_dir, windowsize=20, nan_mask_size=0.4, 
     
     return psfmaxima, background_dev, reffit, np.shape(first_frame), float(first_frame.nbytes), aligned_files
 
-def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.7, pxscale=0.0179, windowsize=20, threadcount=500):
+def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.9, pxscale=0.0179, windowsize=20, threadcount=500):
     
     stats = psutil.virtual_memory()  # returns a named tuple
     available = float(getattr(stats, 'available'))
@@ -564,9 +571,12 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.7
     chopa_files = aligned_files[chops == "CHOP_A"]
     chopb_files = aligned_files[chops == "CHOP_B"]
     
-    a_buffer = int(np.ceil((file_size*len(chopa_files))/(0.7*available)))
-    b_buffer = int(np.ceil((file_size*len(chopb_files))/(0.7*available)))
-    
+    a_buffer = int(np.ceil((file_size*threadcount*len(chopa_files))/(tolerance*available)))
+    b_buffer = int(np.ceil((file_size*threadcount*len(chopb_files))/(tolerance*available)))
+
+    print("Creating integrated files for correlation...")
+    print("Using a buffer of ", int(len(chopa_files)/a_buffer), " frames...")
+
     a_splitlist = np.linspace(0, len(chopa_files), 1+a_buffer)[1:-1].round().astype(int)
     a_filebufs = np.split(chopa_files, a_splitlist)
     
@@ -575,13 +585,15 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.7
 
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        a_bigarr, a_filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), a_filebufs), desc="integrating files"))
+        a_bigarr, a_filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), a_filebufs),\
+                                           desc="integrating files", total=len(a_filebufs)))
     
     chopa_mean_frame = np.sum(a_bigarr, axis=0)/np.sum(a_filecounts)
     
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        b_bigarr, b_filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), b_filebufs), desc="integrating files"))
+        b_bigarr, b_filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), b_filebufs),\
+                                           desc="integrating files", total=len(b_filebufs)))
     
     chopb_mean_frame = np.sum(b_bigarr, axis=0)/np.sum(b_filecounts)
 
@@ -604,7 +616,7 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.7
     eccentricities = np.sqrt(1 - sigmax/sigmay)
     eccentricities_r = np.sqrt(1 - sigmay/sigmax)
     eccentricities[np.isnan(eccentricities)] = eccentricities_r[np.isnan(eccentricities)]
-
+    
     return fwhms, eccentricities, np.asarray(psfmaxima), np.asarray(background_dev), np.asarray(correlations), np.asarray(amplitudes), np.asarray(gauss_offsets)
 
 def frame_rejection(psfmaxima, background_dev, fwhms, eccentricities, correlations, amplitudes, gauss_offsets, sigma=1.5):
