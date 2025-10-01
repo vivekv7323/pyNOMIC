@@ -284,7 +284,7 @@ class EvaluateFrames(object):
                                 10, 10, -1, windowsize, windowsize],\
                                bounds=([1, 1, 1, 1*-np.inf, 1, 1], [np.inf, 200, 200, np.inf, 2*windowsize, 2*windowsize]))
         except:
-            return corr, np.nan, np.nan, np.nan, np.nan
+            return psfmaxima, background_dev, corr, np.nan, np.nan, np.nan, np.nan
         return psfmaxima, background_dev, corr, reffit[0], reffit[1], reffit[2], reffit[3]
 
         
@@ -619,8 +619,32 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.9
     
     return fwhms, eccentricities, np.asarray(psfmaxima), np.asarray(background_dev), np.asarray(correlations), np.asarray(amplitudes), np.asarray(gauss_offsets)
 
-def frame_rejection(psfmaxima, background_dev, fwhms, eccentricities, correlations, amplitudes, gauss_offsets, sigma=1.5):
-        
+def frame_rejection(chops, psfmaxima, background_dev, fwhms, eccentricities, correlations, amplitudes, gauss_offsets, sigma=1.5):
+
+    chopa_bool = (chops == "CHOP_A") & ~np.isnan(fwhms)
+    chopb_bool = (chops == "CHOP_B") & ~np.isnan(fwhms)
+    
+    psfmaxima[chopa_bool] *= np.std(psfmaxima[chopb_bool])/np.std(psfmaxima[chopa_bool])
+    psfmaxima[chopa_bool] += np.median(psfmaxima[chopb_bool]) - np.median(psfmaxima[chopa_bool])
+
+    background_dev[chopa_bool] *= np.std(background_dev[chopb_bool])/np.std(background_dev[chopa_bool])
+    background_dev[chopa_bool] += np.median(background_dev[chopb_bool]) - np.median(background_dev[chopa_bool])
+
+    fwhms[chopa_bool] *= np.std(fwhms[chopb_bool])/np.std(fwhms[chopa_bool])
+    fwhms[chopa_bool] += np.median(fwhms[chopb_bool]) - np.median(fwhms[chopa_bool])
+
+    eccentricities[chopa_bool] *= np.std(eccentricities[chopb_bool])/np.std(eccentricities[chopa_bool])
+    eccentricities[chopa_bool] += np.median(eccentricities[chopb_bool]) - np.median(eccentricities[chopa_bool])
+
+    correlations[chopa_bool] *= np.std(correlations[chopb_bool])/np.std(correlations[chopa_bool])
+    correlations[chopa_bool] += np.median(correlations[chopb_bool]) - np.median(correlations[chopa_bool])
+
+    amplitudes[chopa_bool] *= np.std(amplitudes[chopb_bool])/np.std(amplitudes[chopa_bool])
+    amplitudes[chopa_bool] += np.median(amplitudes[chopb_bool]) - np.median(amplitudes[chopa_bool])
+
+    gauss_offsets[chopa_bool] *= np.std(gauss_offsets[chopb_bool])/np.std(gauss_offsets[chopa_bool])
+    gauss_offsets[chopa_bool] += np.median(gauss_offsets[chopb_bool]) - np.median(gauss_offsets[chopa_bool])
+    
     return (background_dev < np.nanmedian(background_dev) + sigma*np.nanstd(background_dev)) &\
         (psfmaxima > np.nanmedian(psfmaxima) - sigma*np.nanstd(psfmaxima)) &\
         (correlations > np.nanmedian(correlations) - sigma*np.nanstd(correlations)) &\
@@ -687,7 +711,7 @@ def frame_binning(aligned_files, raw_dir, frame_bool, chops, para_angles, array_
     binned_angles = np.zeros(len(binned_files))
     
     binned_chops[np.where(np.isin(binned_filenames,a_binned_filenames) == True)[0]] = "CHOP_A"
-    binned_chops[np.where(np.isin(binned_filenames,a_binned_filenames) == True)[0]] = "CHOP_B"
+    binned_chops[np.where(np.isin(binned_filenames,b_binned_filenames) == True)[0]] = "CHOP_B"
 
     for i in range(len(binned_files)):
         if binned_filenames[i] in a_binned_filenames:
