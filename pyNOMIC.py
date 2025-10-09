@@ -119,7 +119,7 @@ class FileInfoHighPass(object):
         try:
             chop = hdul[0].header['CHOP_POS']
         except:
-            chop = ""
+            chop = "CHOP_NA"
 
         para_angle = hdul[0].header['LBT_PARA']
 
@@ -146,7 +146,7 @@ class SubtractBackground(object):
         
     def __call__(self, i):
 
-        subtracted_dir, files, framew, frameh, edge_cut, channel_edges, vertical_lines = self.params
+        subtracted_dir, files, framew, frameh, edge_cut, channel_edges, vertical_lines, flat = self.params
 
         if i == 0:
             
@@ -169,7 +169,7 @@ class SubtractBackground(object):
     
         unsubtracted = fits.open(files[i])
     
-        subtracted_frame = unsubtracted[0].data[0] - bg
+        subtracted_frame = (unsubtracted[0].data[0] - bg)/flat
 
         for channel_edge in channel_edges:
             subtracted_frame = repairChannelEdges(subtracted_frame, channel_edge)
@@ -282,18 +282,40 @@ class EvaluateFrames(object):
         try:
             reffit, _ = curve_fit(Gaussian2D_ravel, (wx, wy), cutout.ravel(), p0=[np.max(cutout),\
                                 10, 10, -1, windowsize, windowsize],\
-                               bounds=([1, 1, 1, 1*-np.inf, 1, 1], [np.inf, 200, 200, np.inf, 2*windowsize, 2*windowsize]))
+                               bounds=([0, 1, 1, 1*-np.inf, 1, 1], [2*np.max(cutout), 200, 200, np.inf, 2*windowsize, 2*windowsize]))
         except:
             return psfmaxima, background_dev, corr, np.nan, np.nan, np.nan, np.nan
         return psfmaxima, background_dev, corr, reffit[0], reffit[1], reffit[2], reffit[3]
 
-        
+class InjectPlanet(object):
+
+    def __init__(self, params):
+        self.params = params
+    
+    def __call__(self, info):
+
+            wx, wy, directory, array_shape, radius, theta, ratio, width, height = self.params
+
+            hdul = fits.open(info[0])
+            img = hdul[0].data[width:-width, height:-height]
+            hdul.close()
+
+            planet = Gaussian2D((wx, wy), ratio*info[1],info[2],info[3], 0,\
+                 0.5*(array_shape[0] - 1) + radius*np.cos((theta - info[4])*np.pi/180), 0.5*(array_shape[1] - 1) + radius*np.sin((theta - info[4])*np.pi/180))
+
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=(img+planet))])      
+
+            newhdul.writeto(os.path.join(directory, "injected_"+info[0].name), overwrite=True)
+            newhdul.close()
+
+    
+            return True, True
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
 
 def combine(obj, raw_dir, master_badmap_dir, combn, side, testing=False, test_number=None, start_frame=None,\
-            end_frame = None, skip_target_check=False,background_limit = 28000, threadcount=500):
+            end_frame = None, skip_target_check=False,background_limit = 28000, threadcount=50):
 
     master_badmap = (fits.open(master_badmap_dir))[0].data
     master_badmap[:,:3] = 0
@@ -326,7 +348,7 @@ def combine(obj, raw_dir, master_badmap_dir, combn, side, testing=False, test_nu
     print('Searching in ',search_dir)
     
     # directory for all files
-    files = list(pathlib.Path(str(search_dir)).rglob('*.fits'))
+    files = sorted(list(pathlib.Path(str(search_dir)).rglob('*.fits')))
     print("Detected ", len(files), " fits files")
         
     print('Start frame =',start_frame)
@@ -409,7 +431,9 @@ def chop_correction(files, highpass_dir, chops, para_angles, nbg=5, framew=512, 
         lastChopPosition = chops[i]
         
         image.close()
-    
+
+    orig_chops = np.copy(chops)
+
     print("Finding consecutive repeat chop positions...")
     
     chop_groups = []
@@ -438,17 +462,16 @@ def chop_correction(files, highpass_dir, chops, para_angles, nbg=5, framew=512, 
         newhdul = fits.HDUList([fits.PrimaryHDU(data=frames/count)])
         files[group[0]] = pathlib.Path(coadd_dir, files[group[0]].name)
         newhdul.writeto(files[group[0]], overwrite=True)
-    
         newhdul.close()
         
     files = np.delete(files, np.where(np.asarray(files) == '')[0])
     chops = np.delete(chops, np.where(chops == '')[0])
     para_angles = np.delete(para_angles, np.where(para_angles == 500)[0])
 
-    return files, chops, para_angles
+    return files, chops, para_angles, orig_chops
 
-def subtract_background(files, raw_dir, framew=512, frameh=512, edge_cut = 2, channel_edges=[127, 255, 383], vertical_lines=[303],\
-                        threadcount=500):
+def subtract_background(files, raw_dir, flat=None, framew=512, frameh=512, edge_cut = 2, channel_edges=[127, 255, 383], vertical_lines=[303],\
+                        threadcount=50):
     
     print("Subtracting backgrounds....")
 
@@ -462,11 +485,11 @@ def subtract_background(files, raw_dir, framew=512, frameh=512, edge_cut = 2, ch
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
         minima, maxima = zip(*tqdm(pool.imap(SubtractBackground((subtracted_dir, files, framew, frameh, edge_cut,\
-                                                    channel_edges, vertical_lines)), range(len(files))), total=len(files)))
+                                                    channel_edges, vertical_lines, flat)), range(len(files))), total=len(files)))
 
     return subtracted_dir 
 
-def frame_registration(files, subtracted_dir, windowsize=20, nan_mask_size=0.4, threadcount=500):
+def frame_registration(files, subtracted_dir, windowsize=20, nan_mask_size=0.4, threadcount=50):
     
     print("Aligning frames....")    
     
@@ -503,7 +526,7 @@ def frame_registration(files, subtracted_dir, windowsize=20, nan_mask_size=0.4, 
     
     reffit, _ = curve_fit(Circular_Gaussian2D_ravel, (wx, wy), first_cutout.ravel(), p0=[np.max(first_cutout),\
                         10, -1, windowsize, windowsize],\
-                       bounds=([1, 1, 1*-np.inf, 1, 1], [np.inf, 200, np.inf, 2*windowsize, 2*windowsize]))
+                       bounds=([0, 1, 1*-np.inf, 1, 1], [2*np.max(first_cutout), 200, np.inf, 2*windowsize, 2*windowsize]))
     
     reference = Circular_Gaussian2D((wx, wy), reffit[0], reffit[1], reffit[2], windowsize-0.5, windowsize-0.5)
 
@@ -559,11 +582,11 @@ def frame_registration(files, subtracted_dir, windowsize=20, nan_mask_size=0.4, 
     background_dev[0] = np.nanstd(first_frame[np.abs(first_frame - np.nanmedian(first_frame)) < 3*np.nanstd(first_frame)])
     background_dev[1] = np.nanstd(second_frame[np.abs(second_frame - np.nanmedian(second_frame)) < 3*np.nanstd(second_frame)])
     
-    aligned_files = np.asarray(list(pathlib.Path(str(aligned_dir)).rglob('*.fits')))
+    aligned_files = np.asarray(sorted(list(pathlib.Path(str(aligned_dir)).rglob('*.fits'))))
     
     return psfmaxima, background_dev, reffit, np.shape(first_frame), float(first_frame.nbytes), aligned_files
 
-def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.9, pxscale=0.0179, windowsize=20, threadcount=500):
+def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.9, pxscale=0.0179, windowsize=20, threadcount=50):
     
     stats = psutil.virtual_memory()  # returns a named tuple
     available = float(getattr(stats, 'available'))
@@ -617,42 +640,29 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.9
     eccentricities_r = np.sqrt(1 - sigmay/sigmax)
     eccentricities[np.isnan(eccentricities)] = eccentricities_r[np.isnan(eccentricities)]
     
-    return fwhms, eccentricities, np.asarray(psfmaxima), np.asarray(background_dev), np.asarray(correlations), np.asarray(amplitudes), np.asarray(gauss_offsets)
+    return fwhms, eccentricities, np.asarray(psfmaxima), np.asarray(background_dev), np.asarray(correlations), np.asarray(amplitudes), np.asarray(gauss_offsets), sigmax, sigmay
 
-def frame_rejection(chops, psfmaxima, background_dev, fwhms, eccentricities, correlations, amplitudes, gauss_offsets, sigma=1.5):
+def frame_rejection(chops, params, sigma=None):
 
-    chopa_bool = (chops == "CHOP_A") & ~np.isnan(fwhms)
-    chopb_bool = (chops == "CHOP_B") & ~np.isnan(fwhms)
+    chopa_bool = (chops == "CHOP_A")
+    chopb_bool = (chops == "CHOP_B")
+
+    if sigma is None:
+        sigma = 1.5*np.ones(len(params))
+
+    for i in range(len(params)):
+        
+        params[i][chopa_bool] *= np.nanstd(params[i][chopb_bool])/np.nanstd(params[i][chopa_bool])
+        params[i][chopa_bool] += np.nanmedian(params[i][chopb_bool]) - np.nanmedian(params[i][chopa_bool])
+
+    bools = ~np.isnan(params[0])
+
+    for i in range(len(params)):
+        bools = bools & (params[i] < np.nanmedian(params[i]) + sigma[i]*np.nanstd(params[i]))
     
-    psfmaxima[chopa_bool] *= np.std(psfmaxima[chopb_bool])/np.std(psfmaxima[chopa_bool])
-    psfmaxima[chopa_bool] += np.median(psfmaxima[chopb_bool]) - np.median(psfmaxima[chopa_bool])
-
-    background_dev[chopa_bool] *= np.std(background_dev[chopb_bool])/np.std(background_dev[chopa_bool])
-    background_dev[chopa_bool] += np.median(background_dev[chopb_bool]) - np.median(background_dev[chopa_bool])
-
-    fwhms[chopa_bool] *= np.std(fwhms[chopb_bool])/np.std(fwhms[chopa_bool])
-    fwhms[chopa_bool] += np.median(fwhms[chopb_bool]) - np.median(fwhms[chopa_bool])
-
-    eccentricities[chopa_bool] *= np.std(eccentricities[chopb_bool])/np.std(eccentricities[chopa_bool])
-    eccentricities[chopa_bool] += np.median(eccentricities[chopb_bool]) - np.median(eccentricities[chopa_bool])
-
-    correlations[chopa_bool] *= np.std(correlations[chopb_bool])/np.std(correlations[chopa_bool])
-    correlations[chopa_bool] += np.median(correlations[chopb_bool]) - np.median(correlations[chopa_bool])
-
-    amplitudes[chopa_bool] *= np.std(amplitudes[chopb_bool])/np.std(amplitudes[chopa_bool])
-    amplitudes[chopa_bool] += np.median(amplitudes[chopb_bool]) - np.median(amplitudes[chopa_bool])
-
-    gauss_offsets[chopa_bool] *= np.std(gauss_offsets[chopb_bool])/np.std(gauss_offsets[chopa_bool])
-    gauss_offsets[chopa_bool] += np.median(gauss_offsets[chopb_bool]) - np.median(gauss_offsets[chopa_bool])
+    return bools
     
-    return (background_dev < np.nanmedian(background_dev) + sigma*np.nanstd(background_dev)) &\
-        (psfmaxima > np.nanmedian(psfmaxima) - sigma*np.nanstd(psfmaxima)) &\
-        (correlations > np.nanmedian(correlations) - sigma*np.nanstd(correlations)) &\
-        (amplitudes > np.nanmedian(amplitudes) - sigma*np.nanstd(amplitudes)) &\
-        (fwhms < np.nanmedian(fwhms) + sigma*np.nanstd(fwhms)) &\
-        (eccentricities < np.nanmedian(eccentricities) + sigma*np.nanstd(eccentricities)) &\
-        (gauss_offsets < np.nanmedian(gauss_offsets) + sigma*np.nanstd(gauss_offsets))
-
+'''
 def fractional_frame_rejection(psfmaxima, background_dev, fwhms, eccentricities, correlations, amplitudes, gauss_offsets,\
                                fraction_frames=0.3, start_sigma=5, fev=100):
     
@@ -668,8 +678,9 @@ def fractional_frame_rejection(psfmaxima, background_dev, fwhms, eccentricities,
             return frame_bool, sigma
         count += 1
     raise ValueError("Exceeded number of iterations!")
+'''
 
-def frame_binning(aligned_files, raw_dir, frame_bool, chops, para_angles, array_shape, bin=50, threadcount=500):
+def frame_binning(aligned_files, raw_dir, frame_bool, chops, para_angles, array_shape, bin=50, threadcount=50):
     
     root_dir = os.path.dirname(raw_dir)
     binned_dir=os.path.join(root_dir,'binned')
@@ -704,7 +715,7 @@ def frame_binning(aligned_files, raw_dir, frame_bool, chops, para_angles, array_
         b_binned_angles, b_binned_filenames = zip(*tqdm(pool.imap(BinFrames((array_shape, binned_dir)), zip(b_angles, b_binfiles))))
     b_binned_angles, b_binned_filenames = np.asarray(b_binned_angles), np.asarray(b_binned_filenames)
   
-    binned_files = np.asarray(list(pathlib.Path(str(binned_dir)).rglob('*.fits')))
+    binned_files = np.asarray(sorted(list(pathlib.Path(str(binned_dir)).rglob('*.fits'))))
     binned_filenames = np.asarray([f.name for f in binned_files])
 
     binned_chops = np.empty(len(binned_files), dtype="<U16")
@@ -720,6 +731,77 @@ def frame_binning(aligned_files, raw_dir, frame_bool, chops, para_angles, array_
             binned_angles[i] = b_binned_angles[np.where(b_binned_filenames == binned_filenames[i])[0]]
     
     return binned_files, binned_chops, binned_angles
+
+def create_stacked_flat(files, chops, tolerance=0.9, framew=512, frameh=512, threadcount=50):
+    
+    stats = psutil.virtual_memory()  # returns a named tuple
+    available = float(getattr(stats, 'available'))
+
+    hdul = fits.open(files[0])
+    file_size = float(hdul[0].data[0].nbytes)
+    hdul.close()
+    
+    chopa_files = files[chops == "CHOP_A"]
+    chopb_files = files[chops == "CHOP_B"]
+    
+    a_buffer = int(np.ceil((file_size*threadcount*len(chopa_files))/(tolerance*available)))
+    b_buffer = int(np.ceil((file_size*threadcount*len(chopb_files))/(tolerance*available)))
+
+    print("Creating integrated files for correlation...")
+    print("Using a buffer of ", int(len(chopa_files)/a_buffer), " frames...")
+
+    a_splitlist = np.linspace(0, len(chopa_files), 1+a_buffer)[1:-1].round().astype(int)
+    a_filebufs = np.split(chopa_files, a_splitlist)
+    
+    b_splitlist = np.linspace(0, len(chopb_files), 1+b_buffer)[1:-1].round().astype(int)
+    b_filebufs = np.split(chopb_files, b_splitlist)
+
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+        a_bigarr, a_filecounts = zip(*tqdm(pool.imap(IntegrateFrames(((framew, frameh))), a_filebufs),\
+                                           desc="integrating files", total=len(a_filebufs)))
+    
+    chopa_mean_frame = np.sum(a_bigarr, axis=0)/np.sum(a_filecounts)
+    
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+        b_bigarr, b_filecounts = zip(*tqdm(pool.imap(IntegrateFrames(((framew, frameh))), b_filebufs),\
+                                           desc="integrating files", total=len(b_filebufs)))
+    
+    chopb_mean_frame = np.sum(b_bigarr, axis=0)/np.sum(b_filecounts)
+
+    flat = np.concatenate((chopb_mean_frame[:int(framew/2), :], chopa_mean_frame[int(framew/2):, :]))
+    flat[flat == 0] = np.min(flat[flat != 0]) 
+    return flat
+    
+def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, crop_size = None, radius=80, theta=45, ratio=0.01, threadcount=50):
+
+    root_dir = os.path.dirname(os.path.dirname(binned_files[0]))
+    injected_dir = os.path.join(root_dir, 'injected')
+    if not os.path.exists(injected_dir):
+        os.makedirs(injected_dir)
+
+    if crop_size is None:
+        x = np.linspace(0, array_shape[0]-1, array_shape[0])
+        y = np.linspace(0, array_shape[1]-1, array_shape[1])
+        width = None
+        height = None
+    else:
+        x = np.linspace(0, crop_size-1, crop_size)
+        y = np.copy(x)
+        width = int(0.5*(array_shape[0] - crop_size))
+        height = int(0.5*(array_shape[1] - crop_size))
+        array_shape = (crop_size, crop_size)
+        
+    wx, wy = np.meshgrid(y, x)
+    
+    stacked = np.vstack((binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles)).T
+
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+        check_array = zip(*tqdm(pool.imap(InjectPlanet((wx, wy, injected_dir, array_shape, radius, theta, ratio, width, height)), stacked), total=len(stacked)))
+
+    return injected_dir
     
 def repairChannelEdges(image, loc):
     '''
@@ -777,6 +859,13 @@ def Gaussian2D_ravel(xy, amp, sigmax, sigmay, offset, x0, y0):
     '''
     x, y = xy
     return (offset + amp*np.exp(-1*((x-x0)**2/sigmax + (y-y0)**2/sigmay))).ravel()
+
+def Gaussian2D(xy, amp, sigmax, sigmay, offset, x0, y0):
+    '''
+    2D Gaussian function, raveled
+    '''
+    x, y = xy
+    return (offset + amp*np.exp(-1*((x-x0)**2/sigmax + (y-y0)**2/sigmay)))
 
 def circular_mask(center, radius, width, height):
     '''
