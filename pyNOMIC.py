@@ -7,7 +7,7 @@ import os, pathlib, psutil
 import matplotlib.pyplot as plt
 from astropy.io import fits
 #from astropy.time import Time
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from astropy.convolution import convolve, convolve_fft,\
     Box2DKernel, Gaussian1DKernel, Ring2DKernel
 from scipy.signal import correlate
@@ -297,7 +297,7 @@ class InjectPlanet(object):
             wx, wy, directory, array_shape, radius, theta, ratio, width, height = self.params
 
             hdul = fits.open(info[0])
-            img = hdul[0].data[width:-width, height:-height]
+            img = hdul[0].data[width[0]:width[1], height[0]:height[1]]
             hdul.close()
 
             planet = Gaussian2D((wx, wy), ratio*info[1],info[2],info[3], 0,\
@@ -784,13 +784,13 @@ def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
     if crop_size is None:
         x = np.linspace(0, array_shape[0]-1, array_shape[0])
         y = np.linspace(0, array_shape[1]-1, array_shape[1])
-        width = None
-        height = None
+        width = (None, None)
+        height = (None, None)
     else:
         x = np.linspace(0, crop_size-1, crop_size)
         y = np.copy(x)
-        width = int(0.5*(array_shape[0] - crop_size))
-        height = int(0.5*(array_shape[1] - crop_size))
+        width = (int(0.5*(array_shape[0] - crop_size)), -1*int(0.5*(array_shape[0] - crop_size)))
+        height = (int(0.5*(array_shape[1] - crop_size)), -1*int(0.5*(array_shape[1] - crop_size)))
         array_shape = (crop_size, crop_size)
         
     wx, wy = np.meshgrid(y, x)
