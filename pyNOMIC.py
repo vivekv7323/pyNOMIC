@@ -800,8 +800,10 @@ def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
         check_array = zip(*tqdm(pool.imap(InjectPlanet((wx, wy, injected_dir, array_shape, radius, theta, ratio, width, height)), stacked), total=len(stacked)))
+        
+    injected_files = np.asarray(sorted(list(pathlib.Path(str(injected_dir)).rglob('*.fits'))))
 
-    return injected_dir
+    return injected_files, array_shape
     
 def repairChannelEdges(image, loc):
     '''
