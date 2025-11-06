@@ -4,7 +4,7 @@ from astropy.io import fits
 from pyklip.klip import klip_math, collapse_data, estimate_movement, define_annuli_bounds
 from pyklip.parallelized import rotate_imgs, generate_noise_maps
 #from multiprocessing.pool import ThreadPool as Pool
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import scipy.ndimage as ndi
 from tqdm.auto import tqdm
 
@@ -369,6 +369,7 @@ def _klip_section_multifile(aligned_imgs, dims, parangs, r, phi, filenums, numba
 
     for i in range(len(results)):
         output_klipped[i] = results[i]
+    results = []
 
     '''
     # Set up ThreadPoolExecutor
@@ -383,11 +384,15 @@ def _klip_section_multifile(aligned_imgs, dims, parangs, r, phi, filenums, numba
                                             algo, verbose)
                    for file_index, parang, filenum in zip(range(len(filenums)), parangs, filenums)]
 
-        
+        results = []
         with tqdm(total=len(futures), desc="Performing klip subtraction", leave=True) as pbar:
-            for index, task in enumerate(futures):
-                output_klipped[index] = task.result()
+            for f in as_completed(futures):
+                results.append(f.result())
                 pbar.update(1)
+    results = sorted(results, key=lambda x: x[0])
+    for i in range(len(results)):
+        output_klipped[i] = results[i][-1]
+    results = []
 
 
     '''
@@ -397,7 +402,7 @@ def _klip_section_multifile(aligned_imgs, dims, parangs, r, phi, filenums, numba
             output_klipped[file_index]  =  _klip_section_multifile_perfile(aligned_imgs,ref_psfs_mean_sub,  parangs, filenums, file_index, section_ind, covar_psfs, corr_psfs,
                                             parang, filenum, (radstart + radend) / 2.0, numbasis,
                                             maxnumbasis, minmove, minrot, maxrot, mode,
-                                            algo, verbose)
+                                            algo, verbose)[-1]
         except (ValueError, RuntimeError, TypeError) as err:
             print(err.args)
             return False
@@ -582,4 +587,4 @@ def _klip_section_multifile_perfile(aligned_imgs, ref_psfs, pa_imgs, filenums_im
         print(err.args)
         return False
 
-    return klipped
+    return [img_num, klipped]
