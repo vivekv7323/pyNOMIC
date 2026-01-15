@@ -15,6 +15,8 @@ from scipy.optimize import curve_fit
 from scipy.interpolate import RegularGridInterpolator
 from image_registration import chi2_shift
 from multiprocessing.pool import ThreadPool as Pool
+from pyklip.parallelized import rotate_imgs
+from LBT_vip_pca import pca_annulus
 
 #----------------------------------------
 # CLASSES
@@ -310,6 +312,24 @@ class InjectPlanet(object):
 
     
             return True, True
+
+class InjectPlanetMem(object):
+
+    def __init__(self, params):
+        self.params = params
+    
+    def __call__(self, info):
+
+            wx, wy, directory, array_shape, radius, theta, ratio, width, height = self.params
+
+            hdul = fits.open(info[0])
+            img = hdul[0].data[width[0]:width[1], height[0]:height[1]]
+            hdul.close()
+
+            planet = Gaussian2D((wx, wy), ratio*info[1],info[2],info[3], 0,\
+                 0.5*(array_shape[0] - 1) + radius*np.cos((theta - info[4])*np.pi/180), 0.5*(array_shape[1] - 1) + radius*np.sin((theta - info[4])*np.pi/180))
+
+            return img+planet, True
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
@@ -774,7 +794,7 @@ def create_stacked_flat(files, chops, tolerance=0.9, framew=512, frameh=512, thr
     flat[flat == 0] = np.min(flat[flat != 0]) 
     return flat
     
-def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, crop_size = None, radius=80, theta=45, ratio=0.01, threadcount=50):
+def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, memoryMode = 0, crop_size = None, radius=80, theta=45, ratio=0.01, threadcount=50):
 
     root_dir = os.path.dirname(os.path.dirname(binned_files[0]))
     injected_dir = os.path.join(root_dir, 'injected')
@@ -797,14 +817,84 @@ def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
     
     stacked = np.vstack((binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles)).T
 
-    #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
-        check_array = zip(*tqdm(pool.imap(InjectPlanet((wx, wy, injected_dir, array_shape, radius, theta, ratio, width, height)), stacked), total=len(stacked)))
+    if memoryMode == 0:
         
-    injected_files = np.asarray(sorted(list(pathlib.Path(str(injected_dir)).rglob('*.fits'))))
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+            injected_array, check_array = zip(*tqdm(pool.imap(InjectPlanetMem((wx, wy, injected_dir, array_shape, radius, theta, ratio, width, height)), stacked), total=len(stacked)))
+            
+        return np.asarray(injected_array), array_shape
+        
+    elif memoryMode == 1:
 
-    return injected_files, array_shape
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+            check_array = zip(*tqdm(pool.imap(InjectPlanet((wx, wy, injected_dir, array_shape, radius, theta, ratio, width, height)), stacked), total=len(stacked)))
+            
+        injected_files = np.asarray(sorted(list(pathlib.Path(str(injected_dir)).rglob('*.fits'))))
     
+        return injected_files, array_shape
+
+    elif ( memoryMode == 2):
+
+        injected_array = np.zeros((len(stacked), array_shape[0], array_shape[1]))
+
+        for i in range(len(stacked)):
+            info = stacked[i]
+            hdul = fits.open(info[0])
+            img = hdul[0].data[width[0]:width[1], height[0]:height[1]]
+            hdul.close()
+    
+            planet = Gaussian2D((wx, wy), ratio*info[1],info[2],info[3], 0,\
+                 0.5*(array_shape[0] - 1) + radius*np.cos((theta - info[4])*np.pi/180), 0.5*(array_shape[1] - 1) + radius*np.sin((theta - info[4])*np.pi/180))
+            injected_array[i] = img+planet
+
+        return injected_array, array_shape
+    else:
+        raise ValueError("Incorrect memory mode set")
+            
+
+def forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
+                    aperture_size, injection_radius=45, injection_angle=0, initial_contrast=8e-4, delta_rot=0.2, memoryMode=2, threadcount=30):
+        
+        data_input, injected_shape = inject_planet(binned_files, binned_amps, binned_sigmax,\
+                                                       binned_sigmay, binned_angles, array_shape,\
+                                                       threadcount=30, ratio=initial_contrast, radius=injection_radius,\
+                                                       theta=injection_angle, crop_size=300, memoryMode = memoryMode)
+    
+    
+        origin = [injected_shape[0]/2 - 0.5, injected_shape[1]/2 - 0.5]
+        IWA_mask =  circular_mask(origin, aperture_size, injected_shape[0], injected_shape[1])
+        
+        med_image_unsubtracted = np.nanmedian(data_input, axis=0)
+        stellar_flux = np.nansum(med_image_unsubtracted[IWA_mask])
+        stellar_peak_flux = np.nanmax(med_image_unsubtracted[IWA_mask])
+        
+        med_image = pca_annulus(data_input, binned_angles, ncomp=5, annulus_width=1.1*aperture_size, r_guess=injection_radius, delta_rot=delta_rot, nproc=None, svd_mode='lapack', imlib='opencv')
+        
+        circle_pos = np.linspace(0, 2*np.pi, int(np.floor(np.pi*injection_radius/aperture_size))+1)[:-1]
+        fluxes = np.zeros(len(circle_pos))
+        
+        for i in range(len(circle_pos)):
+        
+            mask = circular_mask((origin[0] + injection_radius*np.cos(circle_pos[i] + injection_angle*np.pi/180), origin[1] +\
+                                  injection_radius*np.sin(circle_pos[i] + injection_angle*np.pi/180)), aperture_size,\
+                                 np.shape(med_image)[0], np.shape(med_image)[1])
+            if i == 0:
+                planet_peak_flux = (np.nanmax(med_image[mask]))
+                
+            fluxes[i] = np.nansum(med_image[mask])
+        
+        noise_factor = (np.std(fluxes[1:])*np.sqrt(1 + 1/(len(fluxes) - 1)))
+        
+        initial_snr = (fluxes[0] - np.mean(fluxes[1:]))/noise_factor
+        
+        measured_contrast = initial_contrast + noise_factor*(5 -initial_snr)/stellar_flux#((stellar_peak_flux/planet_peak_flux)*fluxes[0])
+        
+        approx_measured_contrast = (5/initial_snr)*(initial_contrast)
+
+        return initial_snr, noise_factor, measured_contrast, approx_measured_contrast
+        
 def repairChannelEdges(image, loc):
     '''
     Fill in data for three horizontal channel edges on the NOMIC detector, to prevent artifacting.
