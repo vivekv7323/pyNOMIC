@@ -16,8 +16,7 @@ from scipy.optimize import curve_fit
 from scipy.interpolate import RegularGridInterpolator
 from image_registration import chi2_shift
 from multiprocessing.pool import ThreadPool as Pool
-from pyklip.parallelized import rotate_imgs
-from LBT_vip_pca import pca_annulus
+from LBT_vip_pca import pca_annular, pca_annulus
 
 #----------------------------------------
 # CLASSES
@@ -82,6 +81,34 @@ class BinFrames(object):
                 newhdul.close()
         
                 return np.nanmean(angles), "binned_"+filename
+
+class BinFramesMem(object):
+
+        def __init__(self, params):
+            self.params = params
+        
+        def __call__(self, angles_files_tuple):
+
+                array_shape = self.params
+
+                angles, files = angles_files_tuple
+
+                # array for integrating files      
+                buf_3D = np.zeros((len(files), array_shape[0], array_shape[1]))
+
+                for k in range(len(files)):
+
+                        hdul = fits.open(files[k])
+                    
+                        buf_3D[k] = hdul[0].data
+
+                        hdul.close()
+
+                filename = files[0].name
+
+                binned_frame = np.nanmean(buf_3D, axis=0)
+        
+                return binned_frame, np.nanmean(angles), "binned_"+filename
 
 class FileInfoHighPass(object):
 
@@ -282,12 +309,48 @@ class EvaluateFrames(object):
             corr = (np.max(correlate(chopa_mean_frame, frame)))    
     
         cutout = frame[(int(array_shape[0]/2)-windowsize):(int(array_shape[0]/2)+windowsize),(int(array_shape[1]/2)-windowsize):(int(array_shape[1]/2)+windowsize)]
+        
         try:
             reffit, _ = curve_fit(Gaussian2D_ravel, (wx, wy), cutout.ravel(), p0=[np.max(cutout),\
                                 10, 10, -1, windowsize, windowsize],\
                                bounds=([0, 1, 1, 1*-np.inf, 1, 1], [2*np.max(cutout), 200, 200, np.inf, 2*windowsize, 2*windowsize]))
         except:
+            
             return psfmaxima, background_dev, corr, np.nan, np.nan, np.nan, np.nan
+            
+        return psfmaxima, background_dev, corr, reffit[0], reffit[1], reffit[2], reffit[3]
+
+class EvaluateFramesMem(object):
+    
+    def __init__(self, params):
+        
+        self.params = params
+        
+    def __call__(self, chop_file_tuple):
+        
+        img_files, chopa_mean_frame, chopb_mean_frame, wx, wy, windowsize, array_shape = self.params
+
+        chop, index = chop_file_tuple
+        frame = img_files[int(index)]
+
+        psfmaxima = np.nanmax(frame)
+        background_dev = np.nanstd(frame[np.abs(frame - np.nanmedian(frame)) < 3*np.nanstd(frame)])
+        
+        if chop == "CHOP_B":
+            corr = (np.max(correlate(chopb_mean_frame, frame)))
+        else:
+            corr = (np.max(correlate(chopa_mean_frame, frame)))    
+    
+        cutout = frame[(int(array_shape[0]/2)-windowsize):(int(array_shape[0]/2)+windowsize),(int(array_shape[1]/2)-windowsize):(int(array_shape[1]/2)+windowsize)]
+        
+        try:
+            reffit, _ = curve_fit(Gaussian2D_ravel, (wx, wy), cutout.ravel(), p0=[np.max(cutout),\
+                                10, 10, -1, windowsize, windowsize],\
+                               bounds=([0, 1, 1, 1*-np.inf, 1, 1], [2*np.max(cutout), 200, 200, np.inf, 2*windowsize, 2*windowsize]))
+        except:
+            
+            return psfmaxima, background_dev, corr, np.nan, np.nan, np.nan, np.nan
+            
         return psfmaxima, background_dev, corr, reffit[0], reffit[1], reffit[2], reffit[3]
 
 class InjectPlanet(object):
@@ -297,21 +360,35 @@ class InjectPlanet(object):
     
     def __call__(self, info):
 
-            wx, wy, directory, array_shape, radius, theta, ratio, width, height = self.params
-
-            hdul = fits.open(info[0])
-            img = hdul[0].data[width[0]:width[1], height[0]:height[1]]
-            hdul.close()
+            wx, wy, directory, array_shape, radius, theta, ratio, width, height, highpassrad = self.params
 
             planet = Gaussian2D((wx, wy), ratio*info[1],info[2],info[3], 0,\
                  0.5*(array_shape[0] - 1) + radius*np.cos((theta - info[4])*np.pi/180), 0.5*(array_shape[1] - 1) + radius*np.sin((theta - info[4])*np.pi/180))
+        
+            hdul = fits.open(info[0])
+            img = hdul[0].data[width[0]:width[1], height[0]:height[1]] + planet
+            hdul.close()
 
-            newhdul = fits.HDUList([fits.PrimaryHDU(data=(img+planet))])      
+            if highpassrad != None:
+
+                max_indices = np.where(img == np.nanmax(img))
+                maximum = (max_indices[1][0], max_indices[0][0])
+
+                fwhm = 2*np.sqrt(2*np.log(2)*(info[2]+info[3]))
+                
+                max_mask =  circular_mask((maximum[0], maximum[1]), 1.1*fwhm, array_shape[1], array_shape[0])
+                max_aperture =  circular_mask((maximum[0], maximum[1]), 1.1*1.1*fwhm, array_shape[1], array_shape[0]) ^ max_mask
+                
+                new_bg = np.copy(img)
+                new_bg[max_mask] = np.median(new_bg[max_aperture])
+                
+                img = img - convolve_fft(np.pad(new_bg, 50, mode='edge'), Ring2DKernel(int(highpassrad*5/4), highpassrad))[50:-50, 50:-50]
+                
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=(img))])      
 
             newhdul.writeto(os.path.join(directory, "injected_"+info[0].name), overwrite=True)
             newhdul.close()
 
-    
             return True, True
 
 class InjectPlanetMem(object):
@@ -321,16 +398,39 @@ class InjectPlanetMem(object):
     
     def __call__(self, info):
 
-            wx, wy, directory, array_shape, radius, theta, ratio, width, height = self.params
-
+            imgs, wx, wy, array_shape, radius, theta, ratio, width, height, highpassrad = self.params
+            '''
             hdul = fits.open(info[0])
             img = hdul[0].data[width[0]:width[1], height[0]:height[1]]
             hdul.close()
+            '''
 
             planet = Gaussian2D((wx, wy), ratio*info[1],info[2],info[3], 0,\
                  0.5*(array_shape[0] - 1) + radius*np.cos((theta - info[4])*np.pi/180), 0.5*(array_shape[1] - 1) + radius*np.sin((theta - info[4])*np.pi/180))
+        
+            img = imgs[int(info[0])][width[0]:width[1], height[0]:height[1]] + planet
 
-            return img+planet, True
+            if highpassrad != None:
+                try:
+                    max_indices = np.where(img == np.nanmax(img))
+                    
+                    maximum = (max_indices[1][0], max_indices[0][0])
+                except:
+                    plt.imshow(img)
+                    plt.show()
+                    raise ValueError("nanmax failed")
+                fwhm = 2*np.sqrt(2*np.log(2)*(info[2]+info[3]))
+                
+                max_mask =  circular_mask((maximum[0], maximum[1]), 1.1*fwhm, array_shape[1], array_shape[0])
+                max_aperture =  circular_mask((maximum[0], maximum[1]), 1.1*1.1*fwhm, array_shape[1], array_shape[0]) ^ max_mask
+                
+                new_bg = np.copy(img)
+                new_bg[max_mask] = np.median(new_bg[max_aperture])
+                
+                img = img - convolve_fft(np.pad(new_bg, 50, mode='edge'), Ring2DKernel(int(highpassrad*5/4), highpassrad))[50:-50, 50:-50]
+                
+            return img, info[0]
+
 
 class GetContrasts(object):
 
@@ -339,10 +439,10 @@ class GetContrasts(object):
         
         def __call__(self, coords):
 
-                binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, high_buffer, max_iterations,\
-                    hwhm, tolerance = self.params                    
+                binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape, high_buffer, max_iterations,\
+                    hwhm, tolerance, delta_rot, n_segments = self.params                    
     
-                last_contrast = high_buffer*(1.4e-4 + 0.006*np.exp(-1*coords[1]/15))
+                last_contrast = high_buffer*curve_prior
     
                 snr_plot = np.array([])
                 contrast_plot = np.array([])
@@ -356,7 +456,8 @@ class GetContrasts(object):
                     
                     curr_snr, curr_noise_factor =\
                         forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
-                                      hwhm, injection_radius=coords[1], injection_angle=coords[0], initial_contrast=last_contrast, memoryMode=2)
+                                      hwhm, injection_radius=coords[1], injection_angle=coords[0], initial_contrast=last_contrast,\
+                                      crop_size=2*int(np.ceil(1.05*(coords[1]+hwhm))), delta_rot=delta_rot, n_segments=n_segments, memoryMode=2, ncomp=ncomp, highpassrad=highpassrad)
                     snr_plot = np.append(snr_plot, curr_snr)
                     contrast_plot = np.append(contrast_plot, last_contrast)
                     #print("Contrast: ",last_contrast)
@@ -375,21 +476,21 @@ class GetContrasts(object):
                                 results = linregress(snr_plot[-2:], np.log(contrast_plot[-2:]))
     
                                 curr_approx_contrast = np.exp(np.round(results[0]*5 + results[1], 3)) 
-                                
-                                '''
-                                plt.figure(1)
-                                plt.scatter(np.asarray(snr_plot), np.asarray(contrast_plot), s=10, color="orange")
-                                plt.scatter([5],[curr_approx_contrast],  s=20, color="red")
-                                plt.vlines([5], ymin=1e-4, ymax=8e-4, color="green")
-                                plt.yscale("log")
-                                plt.xlabel("SNR")
-                                plt.ylabel("Contrast")
-                                plt.show()
-                                '''
-                                
+                                if curr_approx_contrast < 1e-6 or curr_approx_contrast> 1e-1:
+                                    if curr_snr < 0:
+                                        best_snr = snr_plot[np.nanargmin(np.abs(snr_plot - 5))]
+                                        best_contrast = contrast_plot[np.nanargmin(np.abs(snr_plot - 5))]
+                                        snr_plot = snr_plot[:-1]
+                                        contrast_plot = contrast_plot[:-1]
+                                    else:
+                                        best_snr = curr_snr
+                                        best_contrast = last_contrast
+                                        
+                                    curr_approx_contrast = np.abs((5/best_snr)*(best_contrast))
+
                             else:
                                 
-                                curr_approx_contrast = (5/curr_snr)*(last_contrast)
+                                curr_approx_contrast = np.abs((5/curr_snr)*(last_contrast))
                         else:
                             if len(snr_plot) > 1:
                                 if ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
@@ -408,10 +509,17 @@ class GetContrasts(object):
                     counter += 1
     
                     if anticorrelation & correlation or counter > max_iterations:
-                        print(snr_plot)
-                        print(contrast_plot)
-                        last_contrast = contrast_plot[np.argmin(np.abs(snr_plot - 5))]
-                        curr_snr = snr_plot[np.argmin(np.abs(snr_plot - 5))]
+                        
+                        try:
+                            
+                            last_contrast = contrast_plot[np.nanargmin(np.abs(snr_plot - 5))]
+                            curr_snr = snr_plot[np.nanargmin(np.abs(snr_plot - 5))]
+                            
+                        except:
+                            
+                            last_contrast = np.nan
+                            curr_snr = np.nan
+                            
                         if anticorrelation & correlation:
                             print("Absolute max reached: ", last_contrast)
                         else:
@@ -696,52 +804,70 @@ def frame_registration(files, subtracted_dir, windowsize=20, nan_mask_size=0.4, 
     
     return psfmaxima, background_dev, reffit, np.shape(first_frame), float(first_frame.nbytes), aligned_files
 
-def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.9, pxscale=0.0179, windowsize=20, threadcount=50):
+def frame_evaluation(aligned_files, chops, array_shape, file_size, tolerance=0.9, pxscale=0.0179, windowsize=20, threadcount=50, memoryMode=1):
     
-    stats = psutil.virtual_memory()  # returns a named tuple
-    available = float(getattr(stats, 'available'))
-    
-    chopa_files = aligned_files[chops == "CHOP_A"]
-    chopb_files = aligned_files[chops == "CHOP_B"]
-    
-    a_buffer = int(np.ceil((file_size*threadcount*len(chopa_files))/(tolerance*available)))
-    b_buffer = int(np.ceil((file_size*threadcount*len(chopb_files))/(tolerance*available)))
-
-    print("Creating integrated files for correlation...")
-    print("Using a buffer of ", int(len(chopa_files)/a_buffer), " frames...")
-
-    a_splitlist = np.linspace(0, len(chopa_files), 1+a_buffer)[1:-1].round().astype(int)
-    a_filebufs = np.split(chopa_files, a_splitlist)
-    
-    b_splitlist = np.linspace(0, len(chopb_files), 1+b_buffer)[1:-1].round().astype(int)
-    b_filebufs = np.split(chopb_files, b_splitlist)
-
-    #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
-        a_bigarr, a_filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), a_filebufs),\
-                                           desc="integrating files", total=len(a_filebufs)))
-    
-    chopa_mean_frame = np.sum(a_bigarr, axis=0)/np.sum(a_filecounts)
-    
-    #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
-        b_bigarr, b_filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), b_filebufs),\
-                                           desc="integrating files", total=len(b_filebufs)))
-    
-    chopb_mean_frame = np.sum(b_bigarr, axis=0)/np.sum(b_filecounts)
-
-    chopb_mean_frame[np.isnan(chopb_mean_frame)] = 0
-    chopa_mean_frame[np.isnan(chopa_mean_frame)] = 0
-
     wx = np.linspace(0, 2*windowsize-1, 2*windowsize)
     wy = np.linspace(0, 2*windowsize-1, 2*windowsize)
     wx, wy = np.meshgrid(wx, wy)
     
-    #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
-        psfmaxima, background_dev, correlations, amplitudes, sigmax, sigmay, gauss_offsets =\
-            zip(*tqdm(pool.imap(EvaluateFrames((chopa_mean_frame, chopb_mean_frame, wx, wy, windowsize, array_shape)),\
-                                np.array((chops, aligned_files)).T), total=len(aligned_files)))
+    if memoryMode == 0:
+        
+        chopa_mean_frame = np.nanmean(aligned_files[chops == "CHOP_A"], axis=0)
+        chopb_mean_frame = np.nanmean(aligned_files[chops == "CHOP_B"], axis=0)
+
+        chopb_mean_frame[np.isnan(chopb_mean_frame)] = 0
+        chopa_mean_frame[np.isnan(chopa_mean_frame)] = 0
+
+        
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+            psfmaxima, background_dev, correlations, amplitudes, sigmax, sigmay, gauss_offsets =\
+                zip(*tqdm(pool.imap(EvaluateFramesMem((aligned_files, chopa_mean_frame, chopb_mean_frame, wx, wy, windowsize, array_shape)),\
+                                    np.array((chops, np.arange(len(aligned_files)))).T), total=len(aligned_files)))
+        
+    else:
+    
+        stats = psutil.virtual_memory()  # returns a named tuple
+        available = float(getattr(stats, 'available'))
+        
+        chopa_files = aligned_files[chops == "CHOP_A"]
+        chopb_files = aligned_files[chops == "CHOP_B"]
+        
+        a_buffer = int(np.ceil((file_size*threadcount*len(chopa_files))/(tolerance*available)))
+        b_buffer = int(np.ceil((file_size*threadcount*len(chopb_files))/(tolerance*available)))
+    
+        print("Creating integrated files for correlation...")
+        print("Using a buffer of ", int(len(chopa_files)/a_buffer), " frames...")
+    
+        a_splitlist = np.linspace(0, len(chopa_files), 1+a_buffer)[1:-1].round().astype(int)
+        a_filebufs = np.split(chopa_files, a_splitlist)
+        
+        b_splitlist = np.linspace(0, len(chopb_files), 1+b_buffer)[1:-1].round().astype(int)
+        b_filebufs = np.split(chopb_files, b_splitlist)
+    
+    
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+            a_bigarr, a_filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), a_filebufs),\
+                                               desc="integrating files", total=len(a_filebufs)))
+        
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+            b_bigarr, b_filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), b_filebufs),\
+                                               desc="integrating files", total=len(b_filebufs)))
+        
+        chopa_mean_frame = np.sum(a_bigarr, axis=0)/np.sum(a_filecounts)
+        
+        chopb_mean_frame = np.sum(b_bigarr, axis=0)/np.sum(b_filecounts)
+
+        chopb_mean_frame[np.isnan(chopb_mean_frame)] = 0
+        chopa_mean_frame[np.isnan(chopa_mean_frame)] = 0
+
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+            psfmaxima, background_dev, correlations, amplitudes, sigmax, sigmay, gauss_offsets =\
+                zip(*tqdm(pool.imap(EvaluateFrames((chopa_mean_frame, chopb_mean_frame, wx, wy, windowsize, array_shape)),\
+                                    np.array((chops, aligned_files)).T), total=len(aligned_files)))
     
     sigmax, sigmay = np.asarray(sigmax), np.asarray(sigmay)
 
@@ -769,7 +895,7 @@ def frame_rejection(chops, params, sigma=None):
 
     for i in range(len(params)):
         bools = bools & (params[i] < np.nanmedian(params[i]) + sigma[i]*np.nanstd(params[i]))
-    
+
     return bools
     
 '''
@@ -790,7 +916,7 @@ def fractional_frame_rejection(psfmaxima, background_dev, fwhms, eccentricities,
     raise ValueError("Exceeded number of iterations!")
 '''
 
-def frame_binning(aligned_files, raw_dir, frame_bool, chops, para_angles, array_shape, bin=50, threadcount=50):
+def frame_binning(aligned_files, raw_dir, frame_bool, chops, para_angles, array_shape, bin=50, threadcount=50, memoryMode=1):
     
     root_dir = os.path.dirname(raw_dir)
     binned_dir=os.path.join(root_dir,'binned')
@@ -815,33 +941,67 @@ def frame_binning(aligned_files, raw_dir, frame_bool, chops, para_angles, array_
 
     print("Binning files...")
     
-    #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
-        a_binned_angles, a_binned_filenames  = zip(*tqdm(pool.imap(BinFrames((array_shape, binned_dir)), zip(a_angles, a_binfiles))))
-    a_binned_angles, a_binned_filenames = np.asarray(a_binned_angles), np.asarray(a_binned_filenames)
-    
-    #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
-        b_binned_angles, b_binned_filenames = zip(*tqdm(pool.imap(BinFrames((array_shape, binned_dir)), zip(b_angles, b_binfiles))))
-    b_binned_angles, b_binned_filenames = np.asarray(b_binned_angles), np.asarray(b_binned_filenames)
-  
-    binned_files = np.asarray(sorted(list(pathlib.Path(str(binned_dir)).rglob('*.fits'))))
-    binned_filenames = np.asarray([f.name for f in binned_files])
+    numbinfiles = len(a_binfiles) + len(b_binfiles)
 
-    binned_chops = np.empty(len(binned_files), dtype="<U16")
-    binned_angles = np.zeros(len(binned_files))
-    
-    binned_chops[np.where(np.isin(binned_filenames,a_binned_filenames) == True)[0]] = "CHOP_A"
-    binned_chops[np.where(np.isin(binned_filenames,b_binned_filenames) == True)[0]] = "CHOP_B"
+    binned_chops = np.empty(numbinfiles, dtype="<U16")
+    binned_angles = np.zeros(numbinfiles)
 
-    for i in range(len(binned_files)):
-        if binned_filenames[i] in a_binned_filenames:
-            binned_angles[i] = a_binned_angles[np.where(a_binned_filenames == binned_filenames[i])[0]]
-        else:
-            binned_angles[i] = b_binned_angles[np.where(b_binned_filenames == binned_filenames[i])[0]]
-    
-    return binned_files, binned_chops, binned_angles
+    if memoryMode == 0:
 
+        binned_frames = np.zeros((numbinfiles, array_shape[0], array_shape[1]))
+        
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+            a_binned_frames, a_binned_angles, a_binned_filenames  = zip(*tqdm(pool.imap(BinFramesMem((array_shape)), zip(a_angles, a_binfiles))))
+
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+            b_binned_frames, b_binned_angles, b_binned_filenames = zip(*tqdm(pool.imap(BinFramesMem((array_shape)), zip(b_angles, b_binfiles))))
+            
+        binned_filenames = np.asarray(sorted(a_binned_filenames+b_binned_filenames))
+        a_binned_frames, a_binned_angles, a_binned_filenames = np.asarray(a_binned_frames), np.asarray(a_binned_angles), np.asarray(a_binned_filenames)
+        b_binned_frames, b_binned_angles, b_binned_filenames = np.asarray(b_binned_frames), np.asarray(b_binned_angles), np.asarray(b_binned_filenames)
+
+        binned_chops[np.where(np.isin(binned_filenames,a_binned_filenames) == True)[0]] = "CHOP_A"
+        binned_chops[np.where(np.isin(binned_filenames,b_binned_filenames) == True)[0]] = "CHOP_B"
+    
+        for i in range(numbinfiles):
+            if binned_filenames[i] in a_binned_filenames:
+                binned_angles[i] = a_binned_angles[np.where(a_binned_filenames == binned_filenames[i])[0]]
+                binned_frames[i] = a_binned_frames[np.where(a_binned_filenames == binned_filenames[i])[0]]
+            else:
+                binned_angles[i] = b_binned_angles[np.where(b_binned_filenames == binned_filenames[i])[0]]
+                binned_frames[i] = b_binned_frames[np.where(b_binned_filenames == binned_filenames[i])[0]]
+        
+        return binned_frames, binned_chops, binned_angles
+        
+    else:
+            
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+            a_binned_angles, a_binned_filenames  = zip(*tqdm(pool.imap(BinFrames((array_shape, binned_dir)), zip(a_angles, a_binfiles))))
+        a_binned_angles, a_binned_filenames = np.asarray(a_binned_angles), np.asarray(a_binned_filenames)
+        
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+            b_binned_angles, b_binned_filenames = zip(*tqdm(pool.imap(BinFrames((array_shape, binned_dir)), zip(b_angles, b_binfiles))))
+        b_binned_angles, b_binned_filenames = np.asarray(b_binned_angles), np.asarray(b_binned_filenames)
+
+        binned_files = np.asarray(sorted(list(pathlib.Path(str(binned_dir)).rglob('*.fits'))))
+        binned_filenames = np.asarray([f.name for f in binned_files])
+      
+        binned_chops[np.where(np.isin(binned_filenames,a_binned_filenames) == True)[0]] = "CHOP_A"
+        binned_chops[np.where(np.isin(binned_filenames,b_binned_filenames) == True)[0]] = "CHOP_B"
+    
+        for i in range(len(binned_files)):
+            if binned_filenames[i] in a_binned_filenames:
+                binned_angles[i] = a_binned_angles[np.where(a_binned_filenames == binned_filenames[i])[0]]
+            else:
+                binned_angles[i] = b_binned_angles[np.where(b_binned_filenames == binned_filenames[i])[0]]
+        
+        return binned_files, binned_chops, binned_angles
+
+    
 def create_stacked_flat(files, chops, tolerance=0.9, framew=512, frameh=512, threadcount=50):
     
     stats = psutil.virtual_memory()  # returns a named tuple
@@ -884,12 +1044,7 @@ def create_stacked_flat(files, chops, tolerance=0.9, framew=512, frameh=512, thr
     flat[flat == 0] = np.min(flat[flat != 0]) 
     return flat
     
-def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, memoryMode = 0, crop_size = None, radius=80, theta=45, ratio=0.01, threadcount=50):
-
-    root_dir = os.path.dirname(os.path.dirname(binned_files[0]))
-    injected_dir = os.path.join(root_dir, 'injected')
-    if not os.path.exists(injected_dir):
-        os.makedirs(injected_dir)
+def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, memoryMode = 0, crop_size = None, highpassrad=None, radius=80, theta=45, ratio=0.01, threadcount=50):
 
     if crop_size is None:
         x = np.linspace(0, array_shape[0]-1, array_shape[0])
@@ -904,22 +1059,31 @@ def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
         array_shape = (crop_size, crop_size)
         
     wx, wy = np.meshgrid(y, x)
-    
-    stacked = np.vstack((binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles)).T
 
     if memoryMode == 0:
-        
+
+        stacked = np.vstack((np.arange(len(binned_files)), binned_amps, binned_sigmax, binned_sigmay, binned_angles)).T
+
         #if __name__ == "__main__":
         with Pool(threadcount) as pool:
-            injected_array, check_array = zip(*pool.imap(InjectPlanetMem((wx, wy, injected_dir, array_shape, radius, theta, ratio, width, height)), stacked))
+            injected_array, check_array = zip(*pool.imap(InjectPlanetMem((binned_files, wx, wy, array_shape, radius, theta, ratio, width, height, highpassrad)), stacked))
+
+        sorted_injections = np.asarray(injected_array)[np.argsort(check_array)]
             
-        return np.asarray(injected_array), array_shape
+        return sorted_injections, array_shape
         
     elif memoryMode == 1:
 
+        stacked = np.vstack((binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles)).T
+
+        root_dir = os.path.dirname(os.path.dirname(binned_files[0]))
+        injected_dir = os.path.join(root_dir, 'injected')
+        if not os.path.exists(injected_dir):
+            os.makedirs(injected_dir)
+
         #if __name__ == "__main__":
         with Pool(threadcount) as pool:
-            check_array = zip(*tqdm(pool.imap(InjectPlanet((wx, wy, injected_dir, array_shape, radius, theta, ratio, width, height)), stacked), total=len(stacked)))
+            check_array = zip(*tqdm(pool.imap(InjectPlanet((wx, wy, injected_dir, array_shape, radius, theta, ratio, width, height, highpassrad)), stacked), total=len(stacked)))
             
         injected_files = np.asarray(sorted(list(pathlib.Path(str(injected_dir)).rglob('*.fits'))))
     
@@ -927,9 +1091,12 @@ def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
 
     elif ( memoryMode == 2):
 
+        stacked = np.vstack((binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles)).T
+
         injected_array = np.zeros((len(stacked), array_shape[0], array_shape[1]))
 
         for i in range(len(stacked)):
+            
             info = stacked[i]
             hdul = fits.open(info[0])
             img = hdul[0].data[width[0]:width[1], height[0]:height[1]]
@@ -937,31 +1104,57 @@ def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
     
             planet = Gaussian2D((wx, wy), ratio*info[1],info[2],info[3], 0,\
                  0.5*(array_shape[0] - 1) + radius*np.cos((theta - info[4])*np.pi/180), 0.5*(array_shape[1] - 1) + radius*np.sin((theta - info[4])*np.pi/180))
-            injected_array[i] = img+planet
+
+            img += planet
+
+            if highpassrad != None:
+
+                max_indices = np.where(img == np.nanmax(img))
+                maximum = (max_indices[1][0], max_indices[0][0])
+                
+                max_mask =  circular_mask((maximum[0], maximum[1]), 2.2*hwhm, array_shape[1], array_shape[0])
+                max_aperture =  circular_mask((maximum[0], maximum[1]), 2.2*1.1*hwhm, array_shape[1], array_shape[0]) ^ max_mask
+                
+                new_bg = np.copy(img)
+                new_bg[max_mask] = np.median(new_bg[max_aperture])
+                
+                img = img - convolve_fft(np.pad(new_bg, 50, mode='edge'), Ring2DKernel(int(highpassrad*5/4), highpassrad))[50:-50, 50:-50]
+
+            
+            injected_array[i] = img
 
         return injected_array, array_shape
+        
     else:
+        
         raise ValueError("Incorrect memory mode set")
             
 
-def forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
-                    aperture_size, injection_radius=45, injection_angle=0, initial_contrast=8e-4, delta_rot=0.2, memoryMode=2, threadcount=30):
+def forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, aperture_size, \
+                    injection_radius=45, injection_angle=0, initial_contrast=8e-4, delta_rot=0, n_segments=1, ncomp=5, crop_size=None, highpassrad=None, memoryMode=2, threadcount=30):
         
         data_input, injected_shape = inject_planet(binned_files, binned_amps, binned_sigmax,\
                                                        binned_sigmay, binned_angles, array_shape,\
                                                        threadcount=30, ratio=initial_contrast, radius=injection_radius,\
-                                                       theta=injection_angle, crop_size=300, memoryMode = memoryMode)
+                                                       theta=injection_angle, crop_size=crop_size, memoryMode = memoryMode, highpassrad=highpassrad)
     
-    
+
         origin = [injected_shape[0]/2 - 0.5, injected_shape[1]/2 - 0.5]
         IWA_mask =  circular_mask(origin, aperture_size, injected_shape[0], injected_shape[1])
-        
+        '''
         med_image_unsubtracted = np.nanmedian(data_input, axis=0)
         stellar_flux = np.nansum(med_image_unsubtracted[IWA_mask])
         stellar_peak_flux = np.nanmax(med_image_unsubtracted[IWA_mask])
+        '''
+        if delta_rot == 0 and n_segments <= 1:
         
-        med_image = pca_annulus(data_input, binned_angles, ncomp=5, annulus_width=1.1*2*aperture_size, r_guess=injection_radius, delta_rot=delta_rot, nproc=None, svd_mode='lapack', imlib='opencv')
+            med_image = pca_annulus(data_input, binned_angles, ncomp=ncomp, annulus_width=1.05*2*aperture_size, r_guess=injection_radius, delta_rot=delta_rot, n_segments=n_segments, nproc=None, svd_mode='randsvd', imlib='opencv')
         
+        else:
+            
+            med_image = pca_annular(data_input, binned_angles, fwhm=aperture_size*2, ncomp=ncomp, asize=1.05*2*aperture_size, radius_int=injection_radius-aperture_size, verbose=False,
+                               nproc=None, svd_mode='randsvd', imlib='opencv')
+    
         circle_pos = np.linspace(0, 2*np.pi, int(np.floor(np.pi*injection_radius/aperture_size))+1)[:-1]
         fluxes = np.zeros(len(circle_pos))
         
@@ -972,7 +1165,7 @@ def forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
                                  np.shape(med_image)[0], np.shape(med_image)[1])
             '''
             display = np.copy(med_image)
-            display[mask] *= 0.3
+            display[mask]  = 0
             plt.imshow(display, cmap="inferno")
             plt.show()
             '''
@@ -981,9 +1174,9 @@ def forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
                 planet_peak_flux = (np.nanmax(med_image[mask]))
                 
             fluxes[i] = np.nansum(med_image[mask])
-        
+
         noise_factor = (np.std(fluxes[1:])*np.sqrt(1 + 1/(len(fluxes) - 1)))
-        
+
         snr = (fluxes[0] - np.mean(fluxes[1:]))/noise_factor
         
         #measured_contrast = initial_contrast + noise_factor*(5 - snr)/stellar_flux#((stellar_peak_flux/planet_peak_flux)*fluxes[0])
@@ -991,24 +1184,24 @@ def forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
         return snr, noise_factor
 
 
-def contrast_curve_parallelized(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
-                        injection_radii, angles, hwhm, tolerance=0.05, high_buffer = 2, max_iterations = 10, threadcount=6):
+def contrast_curve_parallelized(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
+                        injection_radii, angles, hwhm, tolerance=0.05, high_buffer = 2, delta_rot = 0.2, n_segments=1, max_iterations = 10, threadcount=6):
 
     coordlist = np.vstack(np.asarray(np.meshgrid(angles, injection_radii)).T)
     
     with Pool(threadcount) as pool:
         approx_contrast_list, snrs_list = zip(*tqdm(pool.imap\
-            (GetContrasts((binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
-                        high_buffer, max_iterations, hwhm, tolerance)), coordlist), total=len(coordlist)))
+            (GetContrasts((binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
+                        high_buffer, max_iterations, hwhm, tolerance, delta_rot, n_segments)), coordlist), total=len(coordlist)))
 
     #Average over angles
-    approx_contrasts = np.nanmean(np.asarray(approx_contrast_list).reshape(len(angles), len(injection_radii)), axis=0)
-    snrs = np.nanmean(np.asarray(snrs_list).reshape(len(angles), len(injection_radii)), axis=0)
+    approx_contrasts = np.asarray(approx_contrast_list).reshape(len(angles), len(injection_radii))
+    snrs = np.asarray(snrs_list).reshape(len(angles), len(injection_radii))
 
     return approx_contrasts, snrs
     
-def contrast_curve(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
-                   injection_radii, angles, hwhm, tolerance=0.05, high_buffer = 2, max_iterations = 10):
+def contrast_curve(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
+                        injection_radii, angles, hwhm, memoryMode=0, tolerance=0.05, high_buffer = 2, delta_rot = 0, n_segments=1, max_iterations = 10, highpassrad=None, ncomp=5, add_info=[None, None]):
     
     snrs_list, approx_contrast_list =\
         np.zeros((len(angles)*len(injection_radii))), np.zeros((len(angles)*len(injection_radii)))
@@ -1017,76 +1210,119 @@ def contrast_curve(binned_files, binned_amps, binned_sigmax, binned_sigmay, binn
 
     for i in tqdm(range(len(coordlist))):
         
-            last_contrast = high_buffer*(1.4e-4 + 0.006*np.exp(-1*coordlist[i][1]/15))
+            last_contrast = high_buffer*curve_prior(coordlist[i][1])
 
             snr_plot = np.array([])
             contrast_plot = np.array([])
                         
             anticorrelation = False
             correlation = False
+            lin_error = False
             counter = 0
         
             while True:
 
-                
-                curr_snr, curr_noise_factor =\
-                    forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
-                                  hwhm, injection_radius=coordlist[i][1], injection_angle=coordlist[i][0], initial_contrast=last_contrast, memoryMode=2)
-                snr_plot = np.append(snr_plot, curr_snr)
-                contrast_plot = np.append(contrast_plot, last_contrast)
-                #print("Contrast: ",last_contrast)
-                #print("SNR: ",curr_snr)
-
-                if (np.abs(curr_snr - 5)/(5) < tolerance):
+                try:
                     
-                    break
+                    curr_snr, curr_noise_factor =\
+                        forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
+                                      hwhm, injection_radius=coordlist[i][1], injection_angle=coordlist[i][0], initial_contrast=last_contrast, crop_size=2*int(np.ceil(1.05*(coordlist[i][1]+hwhm))), delta_rot=delta_rot, n_segments=n_segments, memoryMode=memoryMode, highpassrad=highpassrad, ncomp=ncomp)
                     
-                else:
-                    
-                    if np.max(snr_plot) > 5:
+                    snr_plot = np.append(snr_plot, curr_snr)
+                    contrast_plot = np.append(contrast_plot, last_contrast)
+                    #print("Contrast: ",last_contrast)
+                    #print("SNR: ",curr_snr)
+    
+                    if (np.abs(curr_snr - 5)/(5) < tolerance):
                         
-                        if (len(snr_plot) > 1):
-                            
-                            results = linregress(snr_plot[-2:], np.log(contrast_plot[-2:]))
-
-                            curr_approx_contrast = np.exp(np.round(results[0]*5 + results[1], 3)) 
-                            
-                            '''
-                            plt.figure(1)
-                            plt.scatter(np.asarray(snr_plot), np.asarray(contrast_plot), s=10, color="orange")
-                            plt.scatter([5],[curr_approx_contrast],  s=20, color="red")
-                            plt.vlines([5], ymin=1e-4, ymax=8e-4, color="green")
-                            plt.yscale("log")
-                            plt.xlabel("SNR")
-                            plt.ylabel("Contrast")
-                            plt.show()
-                            '''
-                            
-                        else:
-                            
-                            curr_approx_contrast = (5/curr_snr)*(last_contrast)
+                        break
+                        
                     else:
-                        if len(snr_plot) > 1:
-                            if ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
-                                    ((snr_plot[-1] > snr_plot[-2]) & (contrast_plot[-1] < contrast_plot[-2])):
-                                anticorrelation = True
-                                curr_approx_contrast = 0.25*last_contrast
-                            if ((snr_plot[-1] > snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
-                                    ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] < contrast_plot[-2])):
-                                correlation = True
-                                curr_approx_contrast = 2*last_contrast
-                        else:
-                            curr_approx_contrast = 2*last_contrast
+                        
+                        if np.max(snr_plot) > 5:
                             
-                    last_contrast = curr_approx_contrast
+                            if (len(snr_plot) > 1):
+    
+                                results = linregress(snr_plot[-2:], np.log(contrast_plot[-2:]))
+                                curr_approx_contrast = np.exp(np.round(results[0]*5 + results[1], 3)) 
+                                #print("Linregress: ", curr_approx_contrast)
+                                
+                                if curr_approx_contrast < 1e-6 or curr_approx_contrast> 1e-1:
+                                    
+                                    if curr_snr < 0:
+                                        
+                                        best_snr = snr_plot[np.nanargmin(np.abs(snr_plot - 5))]
+                                        best_contrast = contrast_plot[np.nanargmin(np.abs(snr_plot - 5))]
+                                        snr_plot = snr_plot[:-1]
+                                        contrast_plot = contrast_plot[:-1]
+                                        
+                                    else:
+                                        
+                                        best_snr = curr_snr
+                                        best_contrast = last_contrast
+                                    
+                                    curr_approx_contrast = np.abs((5/best_snr)*(best_contrast))
+                                    if np.isin(curr_approx_contrast, contrast_plot):
+                                        
+                                        results = linregress(snr_plot[snr_plot > 0], np.log(contrast_plot[snr_plot > 0]))
+                                        curr_approx_contrast = np.exp(np.round(results[0]*5 + results[1], 3)) 
+                                        #print("LR Linregress: ", curr_approx_contrast)
+                                    #print("LR Scaling: ", curr_approx_contrast)
+                                '''
+                                plt.figure(1)
+                                plt.scatter(np.asarray(snr_plot), np.asarray(contrast_plot), s=10, color="orange")
+                                plt.plot(snr_plot[-2:], np.log(contrast_plot[-2:]))
+                                plt.scatter([5],[curr_approx_contrast],  s=20, color="red")
+                                plt.vlines([5], ymin=1e-4, ymax=8e-4, color="green")
+                                plt.yscale("log")
+                                plt.xlabel("SNR")
+                                plt.ylabel("Contrast")
+                                plt.show()
+                                '''
+                                
+                            else:
+                                
+                                curr_approx_contrast = np.abs((5/curr_snr)*(last_contrast))
+                        else:
+                            if len(snr_plot) > 1:
+                                if ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
+                                        ((snr_plot[-1] > snr_plot[-2]) & (contrast_plot[-1] < contrast_plot[-2])):
+                                    anticorrelation = True
+                                    curr_approx_contrast = 0.25*last_contrast
+                                if ((snr_plot[-1] > snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
+                                        ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] < contrast_plot[-2])):
+                                    correlation = True
+                                    curr_approx_contrast = 2*last_contrast
+                            else:
+                                curr_approx_contrast = 2*last_contrast
+                                
+                        last_contrast = curr_approx_contrast
+    
+                    counter += 1
 
-                counter += 1
+                except:
+                    lin_error=True
+                    np.savez("Error_log-"+"_iteration-"+str(i)+"_binning-"+str(add_info[0])+"_sigma-"+str(add_info[1])+"_ncomp-"+str(ncomp)+"_highpass-"+\
+                             str(highpassrad)+".npz", i, add_info[0], add_info[1], ncomp, highpassrad)
+                    pass
 
-                if anticorrelation & correlation or counter > max_iterations:
-                    print(snr_plot)
-                    print(contrast_plot)
-                    last_contrast = contrast_plot[np.argmin(np.abs(snr_plot - 5))]
-                    curr_snr = snr_plot[np.argmin(np.abs(snr_plot - 5))]
+                if anticorrelation & correlation or counter > max_iterations or lin_error:
+                    '''
+                    plt.figure(1)
+                    plt.scatter(np.asarray(snr_plot), np.asarray(contrast_plot), s=10, color="orange")
+                    plt.vlines([5], ymin=1e-4, ymax=8e-4, color="green")
+                    plt.yscale("log")
+                    plt.xlabel("SNR")
+                    plt.ylabel("Contrast")
+                    plt.show()
+                    '''
+                    try:
+                        last_contrast = contrast_plot[np.nanargmin(np.abs(snr_plot - 5))]
+                        curr_snr = snr_plot[np.nanargmin(np.abs(snr_plot - 5))]
+                    except:
+                        last_contrast = np.nan
+                        curr_snr = np.nan
+                        
                     if anticorrelation & correlation:
                         print("Absolute max reached: ", last_contrast)
                     else:
@@ -1098,9 +1334,8 @@ def contrast_curve(binned_files, binned_amps, binned_sigmax, binned_sigmay, binn
             snrs_list[i] = curr_snr
 
     #Average over angles
-    approx_contrasts = np.nanmean(np.asarray(approx_contrast_list).reshape(len(angles), len(injection_radii)), axis=0)
-    snrs = np.nanmean(np.asarray(snrs_list).reshape(len(angles), len(injection_radii)), axis=0)
-
+    approx_contrasts = np.asarray(approx_contrast_list).reshape(len(angles), len(injection_radii))
+    snrs = np.asarray(snrs_list).reshape(len(angles), len(injection_radii))
     return approx_contrasts, snrs
         
 def repairChannelEdges(image, loc):
@@ -1178,6 +1413,9 @@ def circular_mask(center, radius, width, height):
     return mask
 
 def pad_frame(frame, new_xlen, new_ylen, padding_x, padding_y):
+    '''
+    Pad frame while maintaining image center
+    '''
     
     if padding_y < 0:
         

@@ -12,6 +12,7 @@ from vip_hci.config.utils_param import setup_parameters, separate_kwargs_dict
 from vip_hci.preproc import (cube_derotate, check_pa_vector,
                        check_scal_vector)
 from pyklip.parallelized import rotate_imgs
+#from pyklip.klip import rotate as klip_rotate
 from vip_hci.preproc.derotation import _find_indices_adi, _define_annuli
 from vip_hci.stats import descriptive_stats
 from vip_hci.var import get_annulus_segments, matrix_scaling, prepare_matrix, reshape_matrix
@@ -19,6 +20,31 @@ from vip_hci.config.paramenum import SvdMode, Imlib, Interpolation, Collapse, AL
 import matplotlib.pyplot as plt
 
 AUTO = "auto"
+'''
+def rotate_imgs(imgs, angles, centers, new_center=None, numthreads=None, flipx=False, hdrs=None):
+    """
+    derotate a sequences of images by their respective angles
+
+    Args:
+        imgs: array of shape (N,y,x) containing N images
+        angles: array of length N with the angle to rotate each frame. Each angle should be CCW in degrees.
+        centers: array of shape N,2 with the [x,y] center of each frame
+        new_centers: a 2-element array with the new center to register each frame. Default is middle of image
+        numthreads: number of threads to be used
+        flipx: flip the x axis after rotation if desired
+        hdrs: array of N wcs astrometry headers
+
+    Returns:
+        derotated: array of shape (N,y,x) containing the derotated images
+    """
+
+    # klip.rotate(img, -angle, oldcenter, [152,152]) for img, angle, oldcenter
+    # multithreading the rotation for each image
+    derotated = np.array([klip_rotate(img, angle, center, new_center, flipx, None)
+                 for img, angle, center in zip(imgs, angles, centers)])
+
+    return derotated
+'''
 
 def pca_annular(*all_args: List, **all_kwargs: dict):
     """PCA model PSF subtraction for ADI, ADI+RDI or ADI+mSDI (IFS) data.
@@ -382,7 +408,6 @@ def _pca_adi_rdi(
                     matrix_segm_ref,
                     matrix_sig_segm,
                 )
-
                 if isinstance(ncomp, list):
                     nncomp = len(ncomp)
                     residuals = []

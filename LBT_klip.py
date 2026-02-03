@@ -370,8 +370,8 @@ def _klip_section_multifile(aligned_imgs, dims, parangs, r, phi, filenums, numba
     for i in range(len(results)):
         output_klipped[i] = results[i]
     results = []
-
     '''
+
     # Set up ThreadPoolExecutor
     n_workers = min(numthreads, len(filenums))
     
