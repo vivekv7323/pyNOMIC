@@ -11,8 +11,8 @@ from vip_hci.config.utils_conf import pool_map, iterable
 from vip_hci.config.utils_param import setup_parameters, separate_kwargs_dict
 from vip_hci.preproc import (cube_derotate, check_pa_vector,
                        check_scal_vector)
-from pyklip.parallelized import rotate_imgs
-#from pyklip.klip import rotate as klip_rotate
+#from pyklip.parallelized import rotate_imgs
+from pyklip.klip import rotate as klip_rotate
 from vip_hci.preproc.derotation import _find_indices_adi, _define_annuli
 from vip_hci.stats import descriptive_stats
 from vip_hci.var import get_annulus_segments, matrix_scaling, prepare_matrix, reshape_matrix
@@ -20,7 +20,7 @@ from vip_hci.config.paramenum import SvdMode, Imlib, Interpolation, Collapse, AL
 import matplotlib.pyplot as plt
 
 AUTO = "auto"
-'''
+
 def rotate_imgs(imgs, angles, centers, new_center=None, numthreads=None, flipx=False, hdrs=None):
     """
     derotate a sequences of images by their respective angles
@@ -44,7 +44,7 @@ def rotate_imgs(imgs, angles, centers, new_center=None, numthreads=None, flipx=F
                  for img, angle, center in zip(imgs, angles, centers)])
 
     return derotated
-'''
+
 
 def pca_annular(*all_args: List, **all_kwargs: dict):
     """PCA model PSF subtraction for ADI, ADI+RDI or ADI+mSDI (IFS) data.
