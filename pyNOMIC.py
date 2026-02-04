@@ -360,55 +360,20 @@ class InjectPlanet(object):
     
     def __call__(self, info):
 
-            wx, wy, directory, array_shape, radius, theta, ratio, width, height, highpassrad = self.params
+            binned_frames, directory, wx, wy, array_shape, radius, theta, ratio, width, height, highpassrad = self.params
 
             planet = Gaussian2D((wx, wy), ratio*info[1],info[2],info[3], 0,\
                  0.5*(array_shape[0] - 1) + radius*np.cos((theta - info[4])*np.pi/180), 0.5*(array_shape[1] - 1) + radius*np.sin((theta - info[4])*np.pi/180))
-        
-            hdul = fits.open(info[0])
-            img = hdul[0].data[width[0]:width[1], height[0]:height[1]] + planet
-            hdul.close()
 
-            if highpassrad != None:
+            if binned_frames.ndim == 3:
 
-                max_indices = np.where(img == np.nanmax(img))
-                maximum = (max_indices[1][0], max_indices[0][0])
+                img = binned_frames[int(info[0])][width[0]:width[1], height[0]:height[1]] + planet
 
-                fwhm = 2*np.sqrt(2*np.log(2)*(info[2]+info[3]))
+            else:
                 
-                max_mask =  circular_mask((maximum[0], maximum[1]), 1.1*fwhm, array_shape[1], array_shape[0])
-                max_aperture =  circular_mask((maximum[0], maximum[1]), 1.1*1.1*fwhm, array_shape[1], array_shape[0]) ^ max_mask
-                
-                new_bg = np.copy(img)
-                new_bg[max_mask] = np.median(new_bg[max_aperture])
-                
-                img = img - convolve_fft(np.pad(new_bg, 50, mode='edge'), Ring2DKernel(int(highpassrad*5/4), highpassrad))[50:-50, 50:-50]
-                
-            newhdul = fits.HDUList([fits.PrimaryHDU(data=(img))])      
-
-            newhdul.writeto(os.path.join(directory, "injected_"+info[0].name), overwrite=True)
-            newhdul.close()
-
-            return True, True
-
-class InjectPlanetMem(object):
-
-    def __init__(self, params):
-        self.params = params
-    
-    def __call__(self, info):
-
-            imgs, wx, wy, array_shape, radius, theta, ratio, width, height, highpassrad = self.params
-            '''
-            hdul = fits.open(info[0])
-            img = hdul[0].data[width[0]:width[1], height[0]:height[1]]
-            hdul.close()
-            '''
-
-            planet = Gaussian2D((wx, wy), ratio*info[1],info[2],info[3], 0,\
-                 0.5*(array_shape[0] - 1) + radius*np.cos((theta - info[4])*np.pi/180), 0.5*(array_shape[1] - 1) + radius*np.sin((theta - info[4])*np.pi/180))
-        
-            img = imgs[int(info[0])][width[0]:width[1], height[0]:height[1]] + planet
+                hdul = fits.open(info[0])
+                img = hdul[0].data[width[0]:width[1], height[0]:height[1]] + planet
+                hdul.close()
 
             if highpassrad != None:
                 try:
@@ -428,8 +393,19 @@ class InjectPlanetMem(object):
                 new_bg[max_mask] = np.median(new_bg[max_aperture])
                 
                 img = img - convolve_fft(np.pad(new_bg, 50, mode='edge'), Ring2DKernel(int(highpassrad*5/4), highpassrad))[50:-50, 50:-50]
-                
-            return img, info[0]
+
+
+            if directory == None:
+            
+                newhdul = fits.HDUList([fits.PrimaryHDU(data=(img))])      
+                newhdul.writeto(os.path.join(directory, "injected_"+info[0].name), overwrite=True)
+                newhdul.close()
+
+                return True, True
+
+            else:
+    
+                return img, info[0]
 
 
 class GetContrasts(object):
@@ -439,7 +415,7 @@ class GetContrasts(object):
         
         def __call__(self, coords):
 
-                binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
+                binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
                          hwhm, file_save, tolerance, high_buffer, delta_rot, n_segments, max_iterations, highpassrad, ncomp, add_info = self.params                    
     
                 last_contrast = high_buffer*curve_prior(coords[1])
@@ -453,96 +429,108 @@ class GetContrasts(object):
                 counter = 0
             
                 while True:
-                    #try:
+                 
+                    try:
                         
-                        curr_snr, curr_noise_factor =\
-                            forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
-                                          hwhm, injection_radius=coords[1], injection_angle=coords[0], initial_contrast=last_contrast,\
-                                          crop_size=2*int(np.ceil(1.05*(coords[1]+hwhm))), delta_rot=delta_rot, n_segments=n_segments, file_save=file_save, ncomp=ncomp, highpassrad=highpassrad, nproc=1)
-                        snr_plot = np.append(snr_plot, curr_snr)
-                        contrast_plot = np.append(contrast_plot, last_contrast)
-                        #print("Contrast: ",last_contrast)
-                        #print("SNR: ",curr_snr)
-        
-                        if (np.abs(curr_snr - 5)/(5) < tolerance):
-                            
-                            break
-                            
-                        else:
-                            
-                            if np.max(snr_plot) > 5:
+                            curr_snr, curr_noise_factor =\
+                                forward_model(binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
+                                              hwhm, injection_radius=coords[1], injection_angle=coords[0], initial_contrast=last_contrast,\
+                                              crop_size=2*int(np.ceil(1.05*(coords[1]+hwhm))), delta_rot=delta_rot, n_segments=n_segments, file_save=file_save, ncomp=ncomp, highpassrad=highpassrad, nproc=1)
+                            snr_plot = np.append(snr_plot, curr_snr)
+                            contrast_plot = np.append(contrast_plot, last_contrast)
+                            #print("Contrast: ",last_contrast)
+                            #print("SNR: ",curr_snr)
+            
+                            if (np.abs(curr_snr - 5)/(5) < tolerance):
                                 
-                                if (len(snr_plot) > 1):
+                                break
+                                
+                            else:
+                                
+                                if np.max(snr_plot) > 5:
                                     
-                                    results = linregress(snr_plot[-2:], np.log(contrast_plot[-2:]))
-        
-                                    curr_approx_contrast = np.exp(np.round(results[0]*5 + results[1], 3)) 
-                                    #print("Linregress: ", curr_approx_contrast)
-                                
-                                    if curr_approx_contrast < 1e-6 or curr_approx_contrast> 1e-1:
+                                    if (len(snr_plot) > 1):
                                         
-                                        if curr_snr < 0:
-                                            best_snr = snr_plot[1:][np.nanargmin(np.abs(snr_plot[1:] - 5))]
-                                            best_contrast = contrast_plot[1:][np.nanargmin(np.abs(snr_plot[1:] - 5))]
-                                            snr_plot = snr_plot[:-1]
-                                            contrast_plot = contrast_plot[:-1]
-                                        else:
-                                            best_snr = curr_snr
-                                            best_contrast = last_contrast
+                                        results = linregress(snr_plot[-2:], np.log(contrast_plot[-2:]))
+            
+                                        curr_approx_contrast = np.exp(np.round(results[0]*5 + results[1], 3)) 
+                                        #print("Linregress: ", curr_approx_contrast)
+                                    
+                                        if curr_approx_contrast < 1e-6 or curr_approx_contrast> 1e-1:
                                             
-                                        curr_approx_contrast = np.abs((5/best_snr)*(best_contrast))
-                                        if np.isin(curr_approx_contrast, contrast_plot):                                        
-                                            results = linregress(snr_plot[snr_plot > 0], np.log(contrast_plot[snr_plot > 0]))
-                                            curr_approx_contrast = np.exp(np.round(results[0]*5 + results[1], 3)) 
-    
+                                            if curr_snr < 0:
+                                                best_snr = snr_plot[1:][np.nanargmin(np.abs(snr_plot[1:] - 5))]
+                                                best_contrast = contrast_plot[1:][np.nanargmin(np.abs(snr_plot[1:] - 5))]
+                                                snr_plot = snr_plot[:-1]
+                                                contrast_plot = contrast_plot[:-1]
+                                            else:
+                                                best_snr = curr_snr
+                                                best_contrast = last_contrast
+                                                
+                                            curr_approx_contrast = np.abs((5/best_snr)*(best_contrast))
+                                            if np.isin(curr_approx_contrast, contrast_plot):                                        
+                                                results = linregress(snr_plot[snr_plot > 0], np.log(contrast_plot[snr_plot > 0]))
+                                                curr_approx_contrast = np.exp(np.round(results[0]*5 + results[1], 3)) 
+                                                #print("LR Linregress: ", curr_approx_contrast)
+                                            #print("LR Scaling: ", curr_approx_contrast)
+                                        '''
+                                        plt.figure(1)
+                                        plt.scatter(np.asarray(snr_plot), np.asarray(contrast_plot), s=10, color="orange")
+                                        plt.plot(snr_plot[-2:], np.log(contrast_plot[-2:]))
+                                        plt.scatter([5],[curr_approx_contrast],  s=20, color="red")
+                                        plt.vlines([5], ymin=1e-4, ymax=8e-4, color="green")
+                                        plt.yscale("log")
+                                        plt.xlabel("SNR")
+                                        plt.ylabel("Contrast")
+                                        plt.show()
+                                        '''
+                                    else:
+                                        
+                                        curr_approx_contrast = np.abs((5/curr_snr)*(last_contrast))
                                 else:
-                                    
-                                    curr_approx_contrast = np.abs((5/curr_snr)*(last_contrast))
-                            else:
-                                if len(snr_plot) > 1:
-                                    if ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
-                                            ((snr_plot[-1] > snr_plot[-2]) & (contrast_plot[-1] < contrast_plot[-2])):
-                                        anticorrelation = True
-                                        curr_approx_contrast = 0.25*last_contrast
-                                    if ((snr_plot[-1] > snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
-                                            ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] < contrast_plot[-2])):
-                                        correlation = True
+                                    if len(snr_plot) > 1:
+                                        if ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
+                                                ((snr_plot[-1] > snr_plot[-2]) & (contrast_plot[-1] < contrast_plot[-2])):
+                                            anticorrelation = True
+                                            curr_approx_contrast = 0.25*last_contrast
+                                        if ((snr_plot[-1] > snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
+                                                ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] < contrast_plot[-2])):
+                                            correlation = True
+                                            curr_approx_contrast = 2*last_contrast
+                                    else:
                                         curr_approx_contrast = 2*last_contrast
-                                else:
-                                    curr_approx_contrast = 2*last_contrast
-                                    
-                            last_contrast = curr_approx_contrast
-        
-                        counter += 1
-
-        
-                        if anticorrelation & correlation or counter > max_iterations or lin_error:
-                            
-                            try:
-                                
-                                last_contrast = contrast_plot[np.nanargmin(np.abs(snr_plot - 5))]
-                                curr_snr = snr_plot[np.nanargmin(np.abs(snr_plot - 5))]
-                                
-                            except:
-                                
-                                last_contrast = np.nan
-                                curr_snr = np.nan
-                                
-                            if anticorrelation & correlation:
-                                print("Absolute max reached: ", last_contrast)
-                            else:
-                                print("Max iterations reached: ", last_contrast)
-                            break
-
-                return last_contrast, curr_snr
-'''
+                                        
+                                last_contrast = curr_approx_contrast
+            
+                            counter += 1
+                        
                     except:
                         
                         lin_error=True
                         np.savez("Error_log-"+"_radius-"+str(coords[1])+"_angle-"+str(coords[0])+"_binning-"+str(add_info[0])+"_sigma-"+str(add_info[1])+"_ncomp-"+str(ncomp)+"_highpass-"+\
                                  str(highpassrad)+".npz", coords, add_info[0], add_info[1], ncomp, highpassrad)
                         pass
-'''
+    
+            
+                    if anticorrelation & correlation or counter > max_iterations or lin_error:
+                        
+                        try:
+                            
+                            last_contrast = contrast_plot[np.nanargmin(np.abs(snr_plot - 5))]
+                            curr_snr = snr_plot[np.nanargmin(np.abs(snr_plot - 5))]
+                            
+                        except:
+                            
+                            last_contrast = np.nan
+                            curr_snr = np.nan
+                            
+                        if anticorrelation & correlation:
+                            print("Absolute max reached: ", last_contrast)
+                        else:
+                            print("Max iterations reached: ", last_contrast)
+                        break
+    
+                return last_contrast, curr_snr
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
@@ -1059,7 +1047,7 @@ def create_stacked_flat(files, chops, tolerance=0.9, framew=512, frameh=512, thr
     flat[flat == 0] = np.min(flat[flat != 0]) 
     return flat
     
-def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, crop_size = None, highpassrad=None, radius=80, theta=45, ratio=0.01, file_save=False, threadcount=50):
+def inject_planet(binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, crop_size = None, highpassrad=None, radius=80, theta=45, ratio=0.01, file_save=False, threadcount=50):
 
     if crop_size is None:
         x = np.linspace(0, array_shape[0]-1, array_shape[0])
@@ -1075,82 +1063,69 @@ def inject_planet(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
         
     wx, wy = np.meshgrid(y, x)
 
-    if binned_files.ndim == 3:
-        stacked = np.vstack((np.arange(len(binned_files)), binned_amps, binned_sigmax, binned_sigmay, binned_angles)).T
+    if binned_frames.ndim == 3:
+        stacked = np.vstack((np.arange(len(binned_frames)), binned_amps, binned_sigmax, binned_sigmay, binned_angles)).T
+        first_arg = binned_frames
     else:
-        stacked = np.vstack((binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles)).T
+        stacked = np.vstack((binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles)).T
+        first_arg = None
         
-    if threadcount != 0:
-        
-        if not file_save:
-    
-            #if __name__ == "__main__":
-            with Pool(threadcount) as pool:
-                injected_array, check_array = zip(*pool.imap(InjectPlanetMem((binned_files, wx, wy, array_shape, radius, theta, ratio, width, height, highpassrad)), stacked))
-    
-            sorted_injections = np.asarray(injected_array)[np.argsort(check_array)]
-                
-            return sorted_injections, array_shape
-            
-        else:
-    
-            root_dir = os.path.dirname(os.path.dirname(binned_files[0]))
+    if file_save:
+            root_dir = os.path.dirname(os.path.dirname(binned_frames[0]))
             injected_dir = os.path.join(root_dir, 'injected')
             if not os.path.exists(injected_dir):
                 os.makedirs(injected_dir)
+    else:
+        injected_dir = None
     
-            #if __name__ == "__main__":
-            with Pool(threadcount) as pool:
-                check_array = zip(*tqdm(pool.imap(InjectPlanet((wx, wy, injected_dir, array_shape, radius, theta, ratio, width, height, highpassrad)), stacked), total=len(stacked)))
+    if threadcount != 0:
+        
+        #if __name__ == "__main__":
+        with Pool(threadcount) as pool:
+                injected_array, check_array = zip(*pool.imap(InjectPlanet((first_arg, injected_dir, wx, wy, array_shape, radius, theta, ratio, width, height, highpassrad)), stacked))
+        
+        if file_save:
+            
+            injected_files = np.asarray(sorted(list(pathlib.Path(str(injected_dir)).rglob('*.fits'))))
+        
+            return injected_files, array_shape
+            
+        else:
+                
+            sorted_injections = np.asarray(injected_array)[np.argsort(check_array)]
+                
+            return sorted_injections, array_shape
+    
+    else:
+
+        planet_gen = InjectPlanet((first_arg, injected_dir, wx, wy, array_shape, radius, theta, ratio, width, height, highpassrad))
+
+        
+        injected_array = np.zeros((len(stacked), array_shape[0], array_shape[1]))
+
+        if file_save:        
+        
+            for i in range(len(stacked)):
+                
+                check, _ = planet_gen(stacked[i])
                 
             injected_files = np.asarray(sorted(list(pathlib.Path(str(injected_dir)).rglob('*.fits'))))
         
             return injected_files, array_shape
-    
-    else:
-
-        injected_array = np.zeros((len(stacked), array_shape[0], array_shape[1]))
-
-        for i in range(len(stacked)):
-
-            if binned_files.ndim == 3:
-
-                img = binned_files[i][width[0]:width[1], height[0]:height[1]]
-
-            else:
+            
+        else:
+            
+            for i in range(len(stacked)):
                 
-                info = stacked[i]
-                hdul = fits.open(info[0])
-                img = hdul[0].data[width[0]:width[1], height[0]:height[1]]
-                hdul.close()
-        
-            planet = Gaussian2D((wx, wy), ratio*info[1],info[2],info[3], 0,\
-                 0.5*(array_shape[0] - 1) + radius*np.cos((theta - info[4])*np.pi/180), 0.5*(array_shape[1] - 1) + radius*np.sin((theta - info[4])*np.pi/180))
+                injected_array[i], check = planet_gen(stacked[i])
 
-            img += planet
-
-            if highpassrad != None:
-
-                max_indices = np.where(img == np.nanmax(img))
-                maximum = (max_indices[1][0], max_indices[0][0])
-                
-                max_mask =  circular_mask((maximum[0], maximum[1]), 2.2*hwhm, array_shape[1], array_shape[0])
-                max_aperture =  circular_mask((maximum[0], maximum[1]), 2.2*1.1*hwhm, array_shape[1], array_shape[0]) ^ max_mask
-                
-                new_bg = np.copy(img)
-                new_bg[max_mask] = np.median(new_bg[max_aperture])
-                
-                img = img - convolve_fft(np.pad(new_bg, 50, mode='edge'), Ring2DKernel(int(highpassrad*5/4), highpassrad))[50:-50, 50:-50]
-
-            injected_array[i] = img
-
-        return injected_array, array_shape
+            return injected_array, array_shape
 
 
-def forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, aperture_size, \
+def forward_model(binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, aperture_size, \
                     injection_radius=45, injection_angle=0, initial_contrast=8e-4, delta_rot=0, n_segments=1, ncomp=5, crop_size=None, highpassrad=None, file_save=False, threadcount=30, nproc=None):
         
-        data_input, injected_shape = inject_planet(binned_files, binned_amps, binned_sigmax,\
+        data_input, injected_shape = inject_planet(binned_frames, binned_amps, binned_sigmax,\
                                                        binned_sigmay, binned_angles, array_shape,\
                                                        threadcount=30, ratio=initial_contrast, radius=injection_radius,\
                                                        theta=injection_angle, crop_size=crop_size, file_save=file_save, highpassrad=highpassrad)
@@ -1165,12 +1140,13 @@ def forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
         '''
         if delta_rot == 0 and n_segments <= 1:
         
-            med_image = pca_annulus(data_input, binned_angles, ncomp=ncomp, annulus_width=1.05*2*aperture_size, r_guess=injection_radius, delta_rot=delta_rot, n_segments=n_segments, nproc=nproc, svd_mode='eigen', imlib='opencv')
+            med_image = pca_annulus(data_input, binned_angles, ncomp=ncomp, annulus_width=1.05*2*aperture_size, r_guess=injection_radius, delta_rot=delta_rot, n_segments=n_segments,\
+                                    nproc=nproc, svd_mode='eigen', imlib='opencv')
         
         else:
             
             med_image = pca_annular(data_input, binned_angles, fwhm=aperture_size*2, ncomp=ncomp, asize=1.05*2*aperture_size, radius_int=injection_radius-aperture_size, verbose=False,
-                               nproc=nproc, svd_mode='eigen', imlib='opencv')
+                                delta_rot=delta_rot, n_segments=n_segments, nproc=nproc, svd_mode='eigen', imlib='opencv')
     
         circle_pos = np.linspace(0, 2*np.pi, int(np.floor(np.pi*injection_radius/aperture_size))+1)[:-1]
         fluxes = np.zeros(len(circle_pos))
@@ -1201,14 +1177,14 @@ def forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binne
         return snr, noise_factor
 
 
-def contrast_curve_parallelized(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
+def contrast_curve_parallelized(binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
                         injection_radii, angles, hwhm, file_save=False, tolerance=0.05, high_buffer = 2, delta_rot = 0, n_segments=1, max_iterations = 10, highpassrad=None, ncomp=5, add_info=[None, None], threadcount=6):
 
     coordlist = np.vstack(np.asarray(np.meshgrid(angles, injection_radii)).T)
     
     with Pool(threadcount) as pool:
         approx_contrast_list, snrs_list = zip(*tqdm(pool.imap\
-            (GetContrasts((binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
+            (GetContrasts((binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
                          hwhm, file_save, tolerance, high_buffer, delta_rot, n_segments, max_iterations, highpassrad, ncomp, add_info)), coordlist), total=len(coordlist)))
 
     #Average over angles
@@ -1217,7 +1193,7 @@ def contrast_curve_parallelized(binned_files, binned_amps, binned_sigmax, binned
 
     return approx_contrasts, snrs
     
-def contrast_curve(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
+def contrast_curve(binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
                         injection_radii, angles, hwhm, file_save=False, tolerance=0.05, high_buffer = 2, delta_rot = 0, n_segments=1, max_iterations = 10, highpassrad=None, ncomp=5, add_info=[None, None]):
     
     snrs_list, approx_contrast_list =\
@@ -1225,131 +1201,13 @@ def contrast_curve(binned_files, binned_amps, binned_sigmax, binned_sigmay, binn
 
     coordlist = np.vstack(np.asarray(np.meshgrid(angles, injection_radii)).T)
 
+    contrast_gen = GetContrasts((binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles, curve_prior, array_shape,\
+                         hwhm, file_save, tolerance, high_buffer, delta_rot, n_segments, max_iterations, highpassrad, ncomp, add_info))
+
     for i in tqdm(range(len(coordlist))):
         
-            last_contrast = high_buffer*curve_prior(coordlist[i][1])
-
-            snr_plot = np.array([])
-            contrast_plot = np.array([])
-                        
-            anticorrelation = False
-            correlation = False
-            lin_error = False
-            counter = 0
+        approx_contrast_list[i], snrs_list[i] = contrast_gen(coordlist[i])
         
-            while True:
-
-                try:
-                    
-                    curr_snr, curr_noise_factor =\
-                        forward_model(binned_files, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape,\
-                                      hwhm, injection_radius=coordlist[i][1], injection_angle=coordlist[i][0], initial_contrast=last_contrast, crop_size=2*int(np.ceil(1.05*(coordlist[i][1]+hwhm))), delta_rot=delta_rot, n_segments=n_segments, file_save=file_save, highpassrad=highpassrad, ncomp=ncomp)
-                    
-                    snr_plot = np.append(snr_plot, curr_snr)
-                    contrast_plot = np.append(contrast_plot, last_contrast)
-                    #print("Contrast: ",last_contrast)
-                    #print("SNR: ",curr_snr)
-    
-                    if (np.abs(curr_snr - 5)/(5) < tolerance):
-                        
-                        break
-                        
-                    else:
-                        
-                        if np.max(snr_plot) > 5:
-                            
-                            if (len(snr_plot) > 1):
-    
-                                results = linregress(snr_plot[-2:], np.log(contrast_plot[-2:]))
-                                curr_approx_contrast = np.exp(np.round(results[0]*5 + results[1], 3)) 
-                                #print("Linregress: ", curr_approx_contrast)
-                                
-                                if curr_approx_contrast < 1e-6 or curr_approx_contrast> 1e-1:
-                                    
-                                    if curr_snr < 0:
-                                        
-                                        best_snr = snr_plot[1:][np.nanargmin(np.abs(snr_plot[1:] - 5))]
-                                        best_contrast = contrast_plot[1:][np.nanargmin(np.abs(snr_plot[1:] - 5))]
-                                        snr_plot = snr_plot[:-1]
-                                        contrast_plot = contrast_plot[:-1]
-                                        
-                                    else:
-                                        
-                                        best_snr = curr_snr
-                                        best_contrast = last_contrast
-                                    
-                                    curr_approx_contrast = np.abs((5/best_snr)*(best_contrast))
-                                    if np.isin(curr_approx_contrast, contrast_plot):
-                                        
-                                        results = linregress(snr_plot[snr_plot > 0], np.log(contrast_plot[snr_plot > 0]))
-                                        curr_approx_contrast = np.exp(np.round(results[0]*5 + results[1], 3)) 
-                                        #print("LR Linregress: ", curr_approx_contrast)
-                                    #print("LR Scaling: ", curr_approx_contrast)
-                                '''
-                                plt.figure(1)
-                                plt.scatter(np.asarray(snr_plot), np.asarray(contrast_plot), s=10, color="orange")
-                                plt.plot(snr_plot[-2:], np.log(contrast_plot[-2:]))
-                                plt.scatter([5],[curr_approx_contrast],  s=20, color="red")
-                                plt.vlines([5], ymin=1e-4, ymax=8e-4, color="green")
-                                plt.yscale("log")
-                                plt.xlabel("SNR")
-                                plt.ylabel("Contrast")
-                                plt.show()
-                                '''
-                                
-                            else:
-                                
-                                curr_approx_contrast = np.abs((5/curr_snr)*(last_contrast))
-                        else:
-                            if len(snr_plot) > 1:
-                                if ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
-                                        ((snr_plot[-1] > snr_plot[-2]) & (contrast_plot[-1] < contrast_plot[-2])):
-                                    anticorrelation = True
-                                    curr_approx_contrast = 0.25*last_contrast
-                                if ((snr_plot[-1] > snr_plot[-2]) & (contrast_plot[-1] > contrast_plot[-2])) or\
-                                        ((snr_plot[-1] < snr_plot[-2]) & (contrast_plot[-1] < contrast_plot[-2])):
-                                    correlation = True
-                                    curr_approx_contrast = 2*last_contrast
-                            else:
-                                curr_approx_contrast = 2*last_contrast
-                                
-                        last_contrast = curr_approx_contrast
-    
-                    counter += 1
-
-                except:
-                    lin_error=True
-                    np.savez("Error_log-"+"_iteration-"+str(i)+"_binning-"+str(add_info[0])+"_sigma-"+str(add_info[1])+"_ncomp-"+str(ncomp)+"_highpass-"+\
-                             str(highpassrad)+".npz", i, add_info[0], add_info[1], ncomp, highpassrad)
-                    pass
-
-                if anticorrelation & correlation or counter > max_iterations or lin_error:
-                    '''
-                    plt.figure(1)
-                    plt.scatter(np.asarray(snr_plot), np.asarray(contrast_plot), s=10, color="orange")
-                    plt.vlines([5], ymin=1e-4, ymax=8e-4, color="green")
-                    plt.yscale("log")
-                    plt.xlabel("SNR")
-                    plt.ylabel("Contrast")
-                    plt.show()
-                    '''
-                    try:
-                        last_contrast = contrast_plot[np.nanargmin(np.abs(snr_plot - 5))]
-                        curr_snr = snr_plot[np.nanargmin(np.abs(snr_plot - 5))]
-                    except:
-                        last_contrast = np.nan
-                        curr_snr = np.nan
-                        
-                    if anticorrelation & correlation:
-                        print("Absolute max reached: ", last_contrast)
-                    else:
-                        print("Max iterations reached: ", last_contrast)
-                    break
-
- 
-            approx_contrast_list[i] = last_contrast
-            snrs_list[i] = curr_snr
-
     #Average over angles
     approx_contrasts = np.asarray(approx_contrast_list).reshape(len(angles), len(injection_radii))
     snrs = np.asarray(snrs_list).reshape(len(angles), len(injection_radii))
