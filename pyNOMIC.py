@@ -110,6 +110,7 @@ class BinFramesMem(object):
         
                 return binned_frame, np.nanmean(angles), "binned_"+filename
 
+
 class FileInfoHighPass(object):
 
     def __init__(self, params):
@@ -117,12 +118,16 @@ class FileInfoHighPass(object):
         
     def __call__(self, file):
 
-        highpass_dir, bools, obj, skip_target_check = self.params
+        highpass_dir, bools, highpassmask, tempflat, obj, skip_target_check, smooth, new_raw_dirs = self.params
 
         hdul = fits.open(file)
 
-        image = hdul[0].data[0]
-        
+        orig = hdul[0].data[0]
+        if tempflat is not None:
+            image = orig/tempflat
+        else:
+            image = np.copy(orig)
+
         # Check if correct object
         if not skip_target_check:
             try:
@@ -154,18 +159,48 @@ class FileInfoHighPass(object):
         para_angle = hdul[0].header['LBT_PARA']
 
         frame_median = np.median(hdul[0].data[0])
-
+        
+        smooth_buf = int(1.25*smooth)
+        
         new_image = np.copy(image)
         new_image[~bools] = np.median(image)
-        new_image = np.pad(new_image, 20, mode='linear_ramp')
+        new_image = np.pad(new_image, smooth_buf, mode='edge')
 
-        filtered_frame = image - convolve_fft(new_image, Box2DKernel(30))[20:-20, 20:-20]
+        filtered_frame = image - convolve_fft(new_image, Box2DKernel(smooth))[smooth_buf:-1*smooth_buf, smooth_buf:-1*smooth_buf]
         filtered_frame[~bools] = np.nan
-        newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame)])
-        newhdul.writeto(os.path.join(highpass_dir, "highpass_"+file.name), overwrite=True)
+        
+        if highpassmask is not None:
+            
+            filtered_frame[~highpassmask] = np.nan
+
+        if len(new_raw_dirs) == 2:
+            
+            array_shape = np.shape(filtered_frame)
+            
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame[:int(0.5*array_shape[0]), :])])
+            newhdul.writeto(os.path.join(highpass_dir[0], "highpass_sx_"+file.name), overwrite=True)
+            newhdul.close()
+            
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame[int(0.5*array_shape[0]):, :])])
+            newhdul.writeto(os.path.join(highpass_dir[1], "highpass_dx_"+file.name), overwrite=True)
+            newhdul.close()
+
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=[orig[:int(0.5*array_shape[0]), :]])])
+            newhdul.writeto(os.path.join(new_raw_dirs[0], "sx_"+file.name), overwrite=True)
+            newhdul.close()
+
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=[orig[int(0.5*array_shape[0]):, :]])])
+            newhdul.writeto(os.path.join(new_raw_dirs[1], "dx_"+file.name), overwrite=True)
+            newhdul.close()
+            
+        else:
+            
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame)])
+            newhdul.writeto(os.path.join(highpass_dir, "highpass_"+file.name), overwrite=True)
+            newhdul.close()
+            
         hdul.close()
-        newhdul.close()
-    
+
         return chop, frame_median, para_angle
 
 class SubtractBackground(object):
@@ -535,28 +570,15 @@ class GetContrasts(object):
 # FUNCTIONS
 #----------------------------------------
 
-def combine(obj, raw_dir, master_badmap_dir, combn, side, testing=False, test_number=None, start_frame=None,\
-            end_frame = None, skip_target_check=False,background_limit = 28000, threadcount=50):
 
-    master_badmap = (fits.open(master_badmap_dir))[0].data
-    master_badmap[:,:3] = 0
-    master_badmap[:,-3:] = 0
-    master_badmap[:3,:] = 0
-    master_badmap[-3:,:] = 0
-    
-    bools = np.full(np.shape(master_badmap), False)
-    bools[master_badmap > 0] = True
+def combine(obj, raw_dir, combn, side, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None, testing=False, test_number=None, start_frame=None,\
+            end_frame = None, skip_target_check=False, background_limit = 28000,  threadcount=50, smooth=30, use_temp_flat=True, double_side=False):
     
     if combn > 0:
         skip_target_check = True
 
     root_dir = os.path.dirname(raw_dir)
-    
-    highpass_dir=os.path.join(root_dir,'highpass')
 
-    if not os.path.exists(highpass_dir):
-        os.makedirs(highpass_dir)
-    
     if combn == 0:
         search_dir=raw_dir
     if combn == 1:
@@ -570,6 +592,7 @@ def combine(obj, raw_dir, master_badmap_dir, combn, side, testing=False, test_nu
     
     # directory for all files
     files = sorted(list(pathlib.Path(str(search_dir)).rglob('*.fits')))
+    
     print("Detected ", len(files), " fits files")
         
     print('Start frame =',start_frame)
@@ -580,20 +603,82 @@ def combine(obj, raw_dir, master_badmap_dir, combn, side, testing=False, test_nu
         files=files[start_frame:start_frame+int(test_number)]
     else:
         files = files[start_frame:end_frame]
+        
     print('New file count = ', len(files))
     
     print('Reading file headers and creating high pass filtered frames...')
 
     chops, frame_medians = [], []
+
+    if (badmap_dir is None) or (use_temp_flat and tempflat_dir is None):
+        tempflat, filtered_frame, badmap = create_new_flat(files)
+    if badmap_dir != None:
+        badmap = (fits.open(badmap_dir))[0].data
+    if (use_temp_flat and tempflat_dir != None):
+        tempflat = (fits.open(tempflat_dir))[0].data   
+    if not use_temp_flat:
+        tempflat = None
+    if highpassmask_dir is not None:
+        highpassmask = (fits.open(highpassmask_dir))[0].data   
+        highpassmask = (highpassmask == 1)
+    else:
+        highpassmask = None
+    bools = np.full(np.shape(badmap), False)
+    bools[badmap > 0] = True
+
+    if double_side:
+        
+        sx_highpass_dir=os.path.join(root_dir,'sx_highpass')
+    
+        if not os.path.exists(sx_highpass_dir):
+            os.makedirs(sx_highpass_dir)
+
+        dx_highpass_dir=os.path.join(root_dir,'dx_highpass')
+    
+        if not os.path.exists(dx_highpass_dir):
+            os.makedirs(dx_highpass_dir)
+
+        sx_raw_dir=os.path.join(root_dir,'sx_raw')
+    
+        if not os.path.exists(sx_raw_dir):
+            os.makedirs(sx_raw_dir)
+
+        dx_raw_dir=os.path.join(root_dir,'dx_raw')
+    
+        if not os.path.exists(dx_raw_dir):
+            os.makedirs(dx_raw_dir)
+
+        highpass_dir = [sx_highpass_dir, dx_highpass_dir]
+        new_raw_dirs  = [sx_raw_dir, dx_raw_dir]
+
+    else:
+        
+        highpass_dir=os.path.join(root_dir,'highpass')
+        new_raw_dirs = []
+    
+        if not os.path.exists(highpass_dir):
+            os.makedirs(highpass_dir)
+    
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        chops, frame_medians, para_angles = zip(*tqdm(pool.imap(FileInfoHighPass((highpass_dir, bools, obj, skip_target_check)), files), total=len(files)))
+        chops, frame_medians, para_angles = zip(*tqdm(pool.imap(FileInfoHighPass((highpass_dir, bools, highpassmask, tempflat, obj, skip_target_check, smooth, new_raw_dirs)), files), total=len(files)))
     
-    return np.asarray(files), np.asarray(chops), np.asarray(frame_medians), np.asarray(para_angles), highpass_dir
+    if double_side:
+        sx_raw_files = np.asarray(sorted(list(pathlib.Path(str(sx_raw_dir)).rglob('*.fits'))))
+        dx_raw_files = np.asarray(sorted(list(pathlib.Path(str(dx_raw_dir)).rglob('*.fits'))))
+        files = [sx_raw_files, dx_raw_files]
+    else:
+        files = np.asarray(files)
 
-def chop_correction(files, highpass_dir, chops, para_angles, nbg=5, framew=512, frameh=512, coadd_limit = 10,\
+    return files, np.asarray(chops), np.asarray(frame_medians), np.asarray(para_angles), highpass_dir
+
+def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=5, framew=512, frameh=512, coadd_limit = 10,\
                     chop_direction = 'UP-DOWN', set_chop_via_bg=False):
     #NBG see above must be odd, greater than or equal to 5
+
+    files = np.copy(orig_files)
+    chops = np.copy(orig_chops)
+    para_angles = np.copy(orig_para_angles)
     
     print("Finding chop positions....")
     
@@ -1004,8 +1089,7 @@ def frame_binning(aligned_files, raw_dir, frame_bool, chops, para_angles, array_
         
         return binned_files, binned_chops, binned_angles
 
-    
-def create_stacked_flat(files, chops, tolerance=0.9, framew=512, frameh=512, threadcount=50):
+def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, framew=512, frameh=512, threadcount=50):
     
     stats = psutil.virtual_memory()  # returns a named tuple
     available = float(getattr(stats, 'available'))
@@ -1043,10 +1127,61 @@ def create_stacked_flat(files, chops, tolerance=0.9, framew=512, frameh=512, thr
     
     chopb_mean_frame = np.sum(b_bigarr, axis=0)/np.sum(b_filecounts)
 
-    flat = np.concatenate((chopb_mean_frame[:int(framew/2), :], chopa_mean_frame[int(framew/2):, :]))
-    flat[flat == 0] = np.min(flat[flat != 0]) 
-    return flat
+    if chop_direction == "UP-DOWN":
+        
+        flat = np.concatenate((chopb_mean_frame[:int(framew/2), :], chopa_mean_frame[int(framew/2):, :]))
+
+    elif chop_direction == "LEFT-RIGHT":
+
+        flat = np.concatenate((chopb_mean_frame[:, :int(frameh/2)].T, chopa_mean_frame[:, int(frameh/2):].T)).T
+
+    else:
+
+        raise ValueError("Invalid chop direction")
     
+    flat[flat == 0] = np.min(flat[flat != 0]) 
+
+    return flat
+
+def create_new_flat(files, tolerance=0.9, framew=512, frameh=512, threadcount=50, sigma=.4, edge_removal=3, smooth=30):
+    
+    stats = psutil.virtual_memory()  # returns a named tuple
+    available = float(getattr(stats, 'available'))
+
+    hdul = fits.open(files[0])
+    file_size = float(hdul[0].data[0].nbytes)
+    hdul.close()
+    
+    buffer = int(np.ceil((file_size*threadcount*len(files))/(tolerance*available)))
+
+    print("Creating integrated files for correlation...")
+    print("Using a buffer of ", int(len(files)/buffer), " frames...")
+
+    splitlist = np.linspace(0, len(files), 1+buffer)[1:-1].round().astype(int)
+    filebufs = np.split(files, splitlist)
+
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+        bigarr, filecounts = zip(*tqdm(pool.imap(IntegrateFrames(((framew, frameh))), filebufs),\
+                                           desc="integrating files", total=len(filebufs)))
+        
+    flat = np.sum(bigarr, axis=0)/np.sum(filecounts)
+
+    flat[flat == 0] = np.min(flat[flat != 0]) 
+    smooth_buf = int(1.25*smooth)
+
+    new_image = np.copy(flat)
+    new_image = np.pad(new_image[edge_removal:-1*edge_removal, edge_removal:-1*edge_removal], smooth_buf+edge_removal, mode='edge')
+
+    filtered_frame = flat - convolve_fft(new_image, Ring2DKernel(smooth, int(0.8*smooth)))[smooth_buf:-1*smooth_buf, smooth_buf:-1*smooth_buf]
+    #filtered_frame[~bools] = np.nan
+    
+    mask = np.ones(np.shape(filtered_frame))
+    mask[(filtered_frame > (sigma*np.std(filtered_frame)+np.median(filtered_frame))) |\
+            (filtered_frame < (-1*sigma*np.std(filtered_frame)+np.median(filtered_frame)))] = 0
+
+    return flat, filtered_frame, mask
+
 def inject_planet(binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, crop_size = None, highpassrad=None, radius=80, theta=45, ratio=0.01, file_save=False, threadcount=50):
 
     if crop_size is None:
