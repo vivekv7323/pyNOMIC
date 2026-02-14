@@ -118,7 +118,7 @@ class FileInfoHighPass(object):
         
     def __call__(self, file):
 
-        highpass_dir, bools, highpassmask, tempflat, obj, skip_target_check, smooth, new_raw_dirs = self.params
+        highpass_dir, bools, highpassmask, tempflat, obj, skip_target_check, smooth, new_raw_dirs, cold_stop_crop = self.params
 
         hdul = fits.open(file)
 
@@ -177,20 +177,20 @@ class FileInfoHighPass(object):
             
             array_shape = np.shape(filtered_frame)
             
-            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame[:int(0.5*array_shape[0]), :])])
-            newhdul.writeto(os.path.join(highpass_dir[0], "highpass_sx_"+file.name), overwrite=True)
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame[:int(0.5*array_shape[0]-cold_stop_crop), :])])
+            newhdul.writeto(os.path.join(highpass_dir[0], "highpass_"+file.name[:-5]+"_sx.fits"), overwrite=True)
             newhdul.close()
             
-            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame[int(0.5*array_shape[0]):, :])])
-            newhdul.writeto(os.path.join(highpass_dir[1], "highpass_dx_"+file.name), overwrite=True)
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame[cold_stop_crop+int(0.5*array_shape[0]):, :])])
+            newhdul.writeto(os.path.join(highpass_dir[1], "highpass_"+file.name[:-5]+"_dx.fits"), overwrite=True)
             newhdul.close()
 
-            newhdul = fits.HDUList([fits.PrimaryHDU(data=[orig[:int(0.5*array_shape[0]), :]])])
-            newhdul.writeto(os.path.join(new_raw_dirs[0], "sx_"+file.name), overwrite=True)
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=[orig[:int(0.5*array_shape[0]-cold_stop_crop), :]])])
+            newhdul.writeto(os.path.join(new_raw_dirs[0], file.name[:-5]+"_sx.fits"), overwrite=True)
             newhdul.close()
 
-            newhdul = fits.HDUList([fits.PrimaryHDU(data=[orig[int(0.5*array_shape[0]):, :]])])
-            newhdul.writeto(os.path.join(new_raw_dirs[1], "dx_"+file.name), overwrite=True)
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=[orig[cold_stop_crop+int(0.5*array_shape[0]):, :]])])
+            newhdul.writeto(os.path.join(new_raw_dirs[1], file.name[:-5]+"_dx.fits"), overwrite=True)
             newhdul.close()
             
         else:
@@ -211,7 +211,8 @@ class SubtractBackground(object):
         
     def __call__(self, i):
 
-        subtracted_dir, files, framew, frameh, edge_cut, channel_edges, vertical_lines, flat = self.params
+        subtracted_dir, files, edge_cut, channel_edges, vertical_lines, striped_regions,\
+            vertical_biases, horizontal_biases, horizontal_lines, flat = self.params
 
         if i == 0:
             
@@ -229,45 +230,57 @@ class SubtractBackground(object):
             hdul2 = fits.open(files[i+1])
             bg = 0.5*(hdul[0].data[0] + hdul2[0].data[0])
             hdul2.close()
+
+        array_shape = np.shape(hdul[0].data[0])
             
         hdul.close()
     
         unsubtracted = fits.open(files[i])
-    
+
+        # Flat correction
         subtracted_frame = (unsubtracted[0].data[0] - bg)/flat
 
         for channel_edge in channel_edges:
             subtracted_frame = repairChannelEdges(subtracted_frame, channel_edge)
+            
         for vertical_line in vertical_lines:
             subtracted_frame = repairVerticalLine(subtracted_frame, vertical_line)
-    
-        offsets = np.mean(subtracted_frame[:,int(framew/2 - 6):int(framew/2 - 1)] - subtracted_frame[:,int(framew/2):int(framew/2 + 5)], axis=1)
-        xoff = np.linspace(0, len(offsets)-1, len(offsets))
-        p = np.polyfit(xoff, offsets, deg=3)
-        subtracted_frame[:, int(framew/2):] =  subtracted_frame[:, int(framew/2):] +\
-                np.asarray([p[0]*xoff**3 + p[1]*xoff**2 + p[2]*xoff + p[3]]*int(framew/2)).T
+            
+        for striped_region in striped_regions:
+            subtracted_frame[striped_region[0]:striped_region[1], striped_region[2]:striped_region[3]] =\
+                destriping(subtracted_frame[striped_region[0]:striped_region[1], striped_region[2]:striped_region[3]],\
+                           ref=striped_region[4])
+
+        for vertical_bias in vertical_biases:
+            subtracted_frame = repairVerticalBias(subtracted_frame, vertical_bias)
+                
+        for horizontal_bias in horizontal_biases:
+            subtracted_frame = repairHorizontalBias(subtracted_frame, horizontal_bias)
+
+        for horizontal_line in horizontal_lines:
+            subtracted_frame = repairHorizontalLine(subtracted_frame, horizontal_line)
+            
         subtracted_frame = subtracted_frame[edge_cut:-1*edge_cut ,edge_cut :-1*edge_cut ]
         
-        framew -= 2*edge_cut
-        frameh -= 2*edge_cut
-        
+        array_shape = (array_shape[0] - 2*edge_cut, array_shape[1] - 2*edge_cut)
+
         max_indices = np.where(subtracted_frame == np.nanmax(subtracted_frame))
         min_indices = np.where(subtracted_frame == np.nanmin(subtracted_frame))
         
         maximum = (max_indices[1][0], max_indices[0][0])
 
         minimum = (min_indices[1][0], min_indices[0][0])
-        
-        max_mask =  circular_mask((maximum[0], maximum[1]), 35, framew, framew)
-        min_mask = circular_mask((minimum[0], minimum[1]), 35, framew, framew)
-        max_aperture =  circular_mask((maximum[0], maximum[1]), 40, framew, framew) ^ max_mask
-        min_aperture = circular_mask((minimum[0], minimum[1]), 40, framew, framew) ^ min_mask
-        
+
+        max_mask =  circular_mask((maximum[0], maximum[1]), 35, array_shape[1], array_shape[0])
+        min_mask = circular_mask((minimum[0], minimum[1]), 35, array_shape[1], array_shape[0])
+        max_aperture =  circular_mask((maximum[0], maximum[1]), 40, array_shape[1], array_shape[0]) ^ max_mask
+        min_aperture = circular_mask((minimum[0], minimum[1]), 40, array_shape[1], array_shape[0]) ^ min_mask
+
         new_bg = np.copy(subtracted_frame)
         new_bg[max_mask] = np.median(new_bg[max_aperture])
         new_bg[min_mask] = np.median(new_bg[min_aperture])
         subtracted_frame = subtracted_frame - convolve_fft(np.pad(new_bg, 50, mode='edge'), Ring2DKernel(25, 20))[50:-50, 50:-50]
-    
+
         newhdul = fits.HDUList([fits.PrimaryHDU(data=(subtracted_frame))])
         newhdul.writeto(os.path.join(subtracted_dir, "subtracted_"+files[i].name), overwrite=True)
         newhdul.close()
@@ -572,7 +585,7 @@ class GetContrasts(object):
 
 
 def combine(obj, raw_dir, combn, side, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None, testing=False, test_number=None, start_frame=None,\
-            end_frame = None, skip_target_check=False, background_limit = 28000,  threadcount=50, smooth=30, use_temp_flat=True, double_side=False):
+            end_frame = None, skip_target_check=False, background_limit = 28000, threadcount=50, smooth=30, use_temp_flat=True, double_side=False, cold_stop_crop=0):
     
     if combn > 0:
         skip_target_check = True
@@ -661,7 +674,8 @@ def combine(obj, raw_dir, combn, side, highpassmask_dir=None, badmap_dir=None, t
     
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        chops, frame_medians, para_angles = zip(*tqdm(pool.imap(FileInfoHighPass((highpass_dir, bools, highpassmask, tempflat, obj, skip_target_check, smooth, new_raw_dirs)), files), total=len(files)))
+        chops, frame_medians, para_angles = zip(*tqdm(pool.imap(FileInfoHighPass((highpass_dir, bools, highpassmask, tempflat, obj,\
+                                                skip_target_check, smooth, new_raw_dirs, cold_stop_crop)), files), total=len(files)))
     
     if double_side:
         sx_raw_files = np.asarray(sorted(list(pathlib.Path(str(sx_raw_dir)).rglob('*.fits'))))
@@ -672,7 +686,7 @@ def combine(obj, raw_dir, combn, side, highpassmask_dir=None, badmap_dir=None, t
 
     return files, np.asarray(chops), np.asarray(frame_medians), np.asarray(para_angles), highpass_dir
 
-def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=5, framew=512, frameh=512, coadd_limit = 10,\
+def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=5, coadd_limit = 10,\
                     chop_direction = 'UP-DOWN', set_chop_via_bg=False):
     #NBG see above must be odd, greater than or equal to 5
 
@@ -688,8 +702,12 @@ def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=
     
     if not os.path.exists(coadd_dir):
         os.makedirs(coadd_dir)
+
+    hdul = fits.open(os.path.join(highpass_dir, "highpass_"+files[0].name))
+    array_shape = np.shape(hdul[0].data)
+    hdul.close()
     
-    frames = np.ones((nbg, framew, frameh))
+    frames = np.ones((nbg, array_shape[0], array_shape[1]))
 
     for j in range(nbg):
         hdul = fits.open(os.path.join(highpass_dir, "highpass_"+files[j].name))
@@ -718,12 +736,12 @@ def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=
         if not set_chop_via_bg:
     
             if (chop_direction == "UP-DOWN") or (chop_direction == "DIAGONAL"):
-                if indices[0][0] < framew/2:
+                if indices[0][0] < array_shape[0]/2:
                     chops[i] = "CHOP_A"
                 else:
                     chops[i] = "CHOP_B"
             elif (chop_direction == "LEFT-RIGHT"):
-                if indices[1][0] < frameh/2:
+                if indices[1][0] < array_shape[1]/2:
                     chops[i] = "CHOP_A"
                 else:
                     chops[i] = "CHOP_B"     
@@ -753,7 +771,7 @@ def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=
     print("Coadding consecutive repeat chop positions...")
 
     for group in tqdm(chop_groups):
-        frames = np.zeros((1, framew, frameh))
+        frames = np.zeros((1, array_shape[0], array_shape[1]))
         count = 0
         for i in range(group[1]):
             hdul = fits.open(files[group[0]+i])
@@ -776,31 +794,31 @@ def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=
 
     return files, chops, para_angles, orig_chops
 
-def subtract_background(files, raw_dir, flat=None, framew=512, frameh=512, edge_cut = 2, channel_edges=[127, 255, 383], vertical_lines=[303],\
-                        threadcount=50):
+def subtract_background(files, raw_dir, flat=None, prefix="", edge_cut = 2, channel_edges=[127, 255, 383], vertical_lines=[303],\
+                        horizontal_lines = [], striped_regions=[], vertical_biases=[], horizontal_biases=[], threadcount=50):
     
     print("Subtracting backgrounds....")
 
     root_dir = os.path.dirname(raw_dir)
 
-    subtracted_dir=os.path.join(root_dir,'subtracted')
+    subtracted_dir=os.path.join(root_dir, prefix+'subtracted')
 
     if not os.path.exists(subtracted_dir):
         os.makedirs(subtracted_dir)
-    
+
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        minima, maxima = zip(*tqdm(pool.imap(SubtractBackground((subtracted_dir, files, framew, frameh, edge_cut,\
-                                                    channel_edges, vertical_lines, flat)), range(len(files))), total=len(files)))
+        minima, maxima = zip(*tqdm(pool.imap(SubtractBackground((subtracted_dir, files, edge_cut, channel_edges, vertical_lines,\
+              striped_regions, vertical_biases, horizontal_biases, horizontal_lines, flat)), range(len(files))), total=len(files)))
 
     return subtracted_dir 
 
-def frame_registration(files, subtracted_dir, windowsize=20, nan_mask_size=0.4, threadcount=50):
+def frame_registration(files, subtracted_dir, prefix='', windowsize=20, nan_mask_size=0.4, threadcount=50):
     
     print("Aligning frames....")    
     
     root_dir = os.path.dirname(subtracted_dir)
-    aligned_dir = os.path.join(root_dir, 'aligned')
+    aligned_dir = os.path.join(root_dir, prefix+'aligned')
     if not os.path.exists(aligned_dir):
         os.makedirs(aligned_dir)
         
@@ -1089,13 +1107,14 @@ def frame_binning(aligned_files, raw_dir, frame_bool, chops, para_angles, array_
         
         return binned_files, binned_chops, binned_angles
 
-def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, framew=512, frameh=512, threadcount=50):
+def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, threadcount=50):
     
     stats = psutil.virtual_memory()  # returns a named tuple
     available = float(getattr(stats, 'available'))
 
     hdul = fits.open(files[0])
     file_size = float(hdul[0].data[0].nbytes)
+    array_shape = np.shape(hdul[0].data[0])
     hdul.close()
     
     chopa_files = files[chops == "CHOP_A"]
@@ -1115,25 +1134,25 @@ def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, f
 
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        a_bigarr, a_filecounts = zip(*tqdm(pool.imap(IntegrateFrames(((framew, frameh))), a_filebufs),\
+        a_bigarr, a_filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), a_filebufs),\
                                            desc="integrating files", total=len(a_filebufs)))
     
     chopa_mean_frame = np.sum(a_bigarr, axis=0)/np.sum(a_filecounts)
     
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        b_bigarr, b_filecounts = zip(*tqdm(pool.imap(IntegrateFrames(((framew, frameh))), b_filebufs),\
+        b_bigarr, b_filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), b_filebufs),\
                                            desc="integrating files", total=len(b_filebufs)))
     
     chopb_mean_frame = np.sum(b_bigarr, axis=0)/np.sum(b_filecounts)
 
     if chop_direction == "UP-DOWN":
         
-        flat = np.concatenate((chopb_mean_frame[:int(framew/2), :], chopa_mean_frame[int(framew/2):, :]))
+        flat = np.concatenate((chopb_mean_frame[:int(array_shape[0]/2), :], chopa_mean_frame[int(array_shape[0]/2):, :]))
 
     elif chop_direction == "LEFT-RIGHT":
 
-        flat = np.concatenate((chopb_mean_frame[:, :int(frameh/2)].T, chopa_mean_frame[:, int(frameh/2):].T)).T
+        flat = np.concatenate((chopb_mean_frame[:, :int(array_shape[1]/2)].T, chopa_mean_frame[:, int(array_shape[1]/2):].T)).T
 
     else:
 
@@ -1143,13 +1162,14 @@ def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, f
 
     return flat
 
-def create_new_flat(files, tolerance=0.9, framew=512, frameh=512, threadcount=50, sigma=.4, edge_removal=3, smooth=30):
+def create_new_flat(files, tolerance=0.9,  threadcount=50, sigma=.4, edge_removal=3, smooth=30):
     
     stats = psutil.virtual_memory()  # returns a named tuple
     available = float(getattr(stats, 'available'))
 
     hdul = fits.open(files[0])
     file_size = float(hdul[0].data[0].nbytes)
+    array_shape = np.shape(hdul[0].data[0])
     hdul.close()
     
     buffer = int(np.ceil((file_size*threadcount*len(files))/(tolerance*available)))
@@ -1162,7 +1182,7 @@ def create_new_flat(files, tolerance=0.9, framew=512, frameh=512, threadcount=50
 
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        bigarr, filecounts = zip(*tqdm(pool.imap(IntegrateFrames(((framew, frameh))), filebufs),\
+        bigarr, filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)), filebufs),\
                                            desc="integrating files", total=len(filebufs)))
         
     flat = np.sum(bigarr, axis=0)/np.sum(filecounts)
@@ -1267,7 +1287,7 @@ def forward_model(binned_frames, binned_amps, binned_sigmax, binned_sigmay, binn
     
 
         origin = [injected_shape[0]/2 - 0.5, injected_shape[1]/2 - 0.5]
-        IWA_mask =  circular_mask(origin, aperture_size, injected_shape[0], injected_shape[1])
+        IWA_mask =  circular_mask(origin, aperture_size, injected_shape[1], injected_shape[0])
         '''
         med_image_unsubtracted = np.nanmedian(data_input, axis=0)
         stellar_flux = np.nansum(med_image_unsubtracted[IWA_mask])
@@ -1383,6 +1403,56 @@ def repairVerticalLine(image, loc):
     image[:, loc] += convolve(true - image[:, loc], gauss)
 
     return image
+
+def repairHorizontalLine(image, loc):
+        
+    '''
+    Repair horizontal line artifact in the NOMIC detector while preserving the unique noise profile.
+    '''
+    gauss = Gaussian1DKernel(stddev=5)
+    
+    # Average adjacent columns
+    true = 0.5*(image[loc+1,:] + image[loc-1,:])
+
+    # Get smoothed difference between the column and the averaged adjacent columns and add it back
+    image[loc,:] += convolve(true - image[loc,:], gauss)
+
+    return image
+
+def repairVerticalBias(frame, position):
+
+    array_shape = np.shape(frame)
+    offsets = np.mean(frame[:,int(position - 6):int(position- 1)] -\
+                      frame[:,int(position):int(position + 5)], axis=1)
+    xoff = np.linspace(0, len(offsets)-1, len(offsets))
+    p = np.polyfit(xoff, offsets, deg=3)
+
+    frame[:, int(position):] =  frame[:, int(position):] +\
+            np.asarray([p[0]*xoff**3 + p[1]*xoff**2 + p[2]*xoff + p[3]]*int(array_shape[1] - position)).T
+
+    return frame
+    
+def repairHorizontalBias(frame, position):
+    
+    array_shape = np.shape(frame)
+    offsets = np.mean(frame[int(position - 6):int(position- 1),:] -\
+                      frame[int(position):int(position + 5),:], axis=0)
+    xoff = np.linspace(0, len(offsets)-1, len(offsets))
+    p = np.polyfit(xoff, offsets, deg=3)
+
+    frame[int(position):,:] =  frame[int(position):,:] +\
+            np.asarray([p[0]*xoff**3 + p[1]*xoff**2 + p[2]*xoff + p[3]]*int(array_shape[0] - position))
+
+    return frame 
+
+def destriping(frame, ref=None):
+        
+    offsets = np.nanmedian(frame, axis=1)
+    if ref is None:
+        offsets -= np.nanmedian(offsets)
+    else:
+        offsets -= offsets[ref]
+    return frame - np.asarray([offsets]*np.shape(frame)[1]).T
 
 def Circular_Gaussian2D_ravel(xy, amp, sigma, offset, x0, y0):
     '''
