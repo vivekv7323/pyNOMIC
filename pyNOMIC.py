@@ -51,6 +51,71 @@ class IntegrateFrames(object):
             
                 return np.nanmean(buf_3D, axis=0)*count, count
 
+class IntegrateFramesForFlat(object):
+
+    def __init__(self, params):
+        
+        self.params = params
+    
+    def __call__(self, indices):
+
+            files, chops, flat, array_shape, edge_cut, inner_rad, outer_rad = self.params
+
+            # array for integrating files      
+            buf_3D = np.zeros((len(indices), array_shape[0], array_shape[1]))
+
+            count = 0
+
+            for k in range(len(indices)):
+
+                    #try:
+                    
+                    if indices[k] == 0:
+                        
+                        hdul = fits.open(files[1])
+                        bg = np.float64(hdul[0].data[0])
+                
+                    elif indices[k] == (len(files) -1):
+                        
+                        hdul = fits.open(files[len(files)-2])
+                        bg = np.float64(hdul[0].data[0]) 
+                
+                    else:
+                        
+                        hdul = fits.open(files[indices[k]-1])
+                        hdul2 = fits.open(files[indices[k]+1])
+                        bg = 0.5*(hdul[0].data[0] + hdul2[0].data[0])
+                        hdul2.close()
+
+                    unsubtracted = fits.open(files[indices[k]])
+                    img = unsubtracted[0].data[0]
+                    subtracted_frame = (unsubtracted[0].data[0] - bg)/flat
+
+                    subtracted_frame = subtracted_frame[edge_cut:-1*edge_cut ,edge_cut :-1*edge_cut ]
+ 
+                    max_indices = np.where(subtracted_frame == np.nanmax(subtracted_frame))
+                    #min_indices = np.where(subtracted_frame == np.nanmin(subtracted_frame))
+
+                    psfrem = psf_removal_mask((max_indices[1]+2, max_indices[0]+2), inner_rad,\
+                                              outer_rad, array_shape[1], array_shape[0]) 
+
+                    if chops[indices[k]] == "CHOP_A":
+                        offset = np.nanmedian(bg[:int(array_shape[0]/2), :] - img[:int(array_shape[0]/2), :])
+                    else:
+                        offset = np.nanmedian(bg[int(array_shape[0]/2):, :] - img[int(array_shape[0]/2):, :])
+
+                    buf_3D[k] = img*(1-psfrem)+(bg-offset)*psfrem
+
+                    hdul.close()
+                    unsubtracted.close()
+
+                    count += 1
+                            
+                   # except:
+                   #         buf_3D[k][:] = np.nan 
+        
+            return np.nanmean(buf_3D, axis=0)*count, count
+
 class BinFrames(object):
 
         def __init__(self, params):
@@ -423,7 +488,7 @@ class InjectPlanet(object):
                 img = hdul[0].data[width[0]:width[1], height[0]:height[1]] + planet
                 hdul.close()
 
-            if highpassrad != None:
+            if highpassrad is not None:
                 try:
                     max_indices = np.where(img == np.nanmax(img))
                     
@@ -443,7 +508,7 @@ class InjectPlanet(object):
                 img = img - convolve_fft(np.pad(new_bg, 50, mode='edge'), Ring2DKernel(int(highpassrad*5/4), highpassrad))[50:-50, 50:-50]
 
 
-            if directory == None:
+            if directory is not None:
             
                 newhdul = fits.HDUList([fits.PrimaryHDU(data=(img))])      
                 newhdul.writeto(os.path.join(directory, "injected_"+info[0].name), overwrite=True)
@@ -611,7 +676,7 @@ def combine(obj, raw_dir, combn, side, highpassmask_dir=None, badmap_dir=None, t
     print('Start frame =',start_frame)
 
     if testing:
-        if test_number == None:
+        if test_number is None:
             raise ValueError("If testing, you must specify the number of frames to test in the test_number keyword.")
         files=files[start_frame:start_frame+int(test_number)]
     else:
@@ -625,9 +690,9 @@ def combine(obj, raw_dir, combn, side, highpassmask_dir=None, badmap_dir=None, t
 
     if (badmap_dir is None) or (use_temp_flat and tempflat_dir is None):
         tempflat, filtered_frame, badmap = create_new_flat(files)
-    if badmap_dir != None:
+    if badmap_dir is not None:
         badmap = (fits.open(badmap_dir))[0].data
-    if (use_temp_flat and tempflat_dir != None):
+    if (use_temp_flat and tempflat_dir is not None):
         tempflat = (fits.open(tempflat_dir))[0].data   
     if not use_temp_flat:
         tempflat = None
@@ -1116,6 +1181,10 @@ def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, t
     file_size = float(hdul[0].data[0].nbytes)
     array_shape = np.shape(hdul[0].data[0])
     hdul.close()
+
+    if len(array_shape) == 3:
+        array_shape = (array_shape[1], array_shape[2])
+        
     
     chopa_files = files[chops == "CHOP_A"]
     chopb_files = files[chops == "CHOP_B"]
@@ -1153,6 +1222,12 @@ def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, t
     elif chop_direction == "LEFT-RIGHT":
 
         flat = np.concatenate((chopb_mean_frame[:, :int(array_shape[1]/2)].T, chopa_mean_frame[:, int(array_shape[1]/2):].T)).T
+
+    elif chop_direction == "COMBINED":
+
+        chopa_mean_frame[chopa_mean_frame == 0] = np.min(chopa_mean_frame[chopa_mean_frame != 0]) 
+        chopb_mean_frame[chopb_mean_frame == 0] = np.min(chopb_mean_frame[chopb_mean_frame != 0]) 
+        return chopa_mean_frame, chopb_mean_frame        
 
     else:
 
@@ -1201,6 +1276,56 @@ def create_new_flat(files, tolerance=0.9,  threadcount=50, sigma=.4, edge_remova
             (filtered_frame < (-1*sigma*np.std(filtered_frame)+np.median(filtered_frame)))] = 0
 
     return flat, filtered_frame, mask
+
+
+def create_proper_flat(files, chops, inner_rad = 27, outer_rad = 32, edge_cut=2,\
+                        tolerance=0.9, threadcount=50):
+        
+    stats = psutil.virtual_memory()  # returns a named tuple
+    available = float(getattr(stats, 'available'))
+    
+    hdul = fits.open(files[0])
+    file_size = float(hdul[0].data.nbytes)
+    array_shape = np.shape(hdul[0].data)
+    hdul.close()
+    
+    if len(array_shape) == 3:
+        array_shape = (array_shape[1], array_shape[2])
+    
+    chopa_files = np.where(chops == "CHOP_A")[0]
+    chopb_files = np.where(chops == "CHOP_B")[0]
+    
+    a_buffer = int(np.ceil((file_size*threadcount*len(chopa_files))/(tolerance*available)))
+    b_buffer = int(np.ceil((file_size*threadcount*len(chopb_files))/(tolerance*available)))
+    
+    print("Creating integrated files for correlation...")
+    print("Using a buffer of ", int(len(chopa_files)/a_buffer), " frames...")
+    
+    a_splitlist = np.linspace(0, len(chopa_files), 1+a_buffer)[1:-1].round().astype(int)
+    a_filebufs = np.split(chopa_files, a_splitlist)
+    
+    b_splitlist = np.linspace(0, len(chopb_files), 1+b_buffer)[1:-1].round().astype(int)
+    b_filebufs = np.split(chopb_files, b_splitlist)
+    
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+        a_bigarr, a_filecounts = zip(*tqdm(pool.imap(IntegrateFramesForFlat((files, chops, combined_flat, array_shape, edge_cut, inner_rad, outer_rad)), a_filebufs),\
+                                           desc="integrating files", total=len(a_filebufs)))
+    
+    chopa_mean_frame = np.sum(a_bigarr, axis=0)/np.sum(a_filecounts)
+    
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+        b_bigarr, b_filecounts = zip(*tqdm(pool.imap(IntegrateFramesForFlat((files, chops, combined_flat, array_shape, edge_cut, inner_rad, outer_rad)), b_filebufs),\
+                                           desc="integrating files", total=len(b_filebufs)))
+    
+    chopb_mean_frame = np.sum(b_bigarr, axis=0)/np.sum(b_filecounts)
+    
+    chopa_mean_frame[chopa_mean_frame == 0] = np.min(chopa_mean_frame[chopa_mean_frame != 0]) 
+    chopb_mean_frame[chopb_mean_frame == 0] = np.min(chopb_mean_frame[chopb_mean_frame != 0]) 
+     
+    return chopa_mean_frame, chopb_mean_frame
+
 
 def inject_planet(binned_frames, binned_amps, binned_sigmax, binned_sigmay, binned_angles, array_shape, crop_size = None, highpassrad=None, radius=80, theta=45, ratio=0.01, file_save=False, threadcount=50):
 
@@ -1366,9 +1491,39 @@ def contrast_curve(binned_frames, binned_amps, binned_sigmax, binned_sigmay, bin
     #Average over angles
     approx_contrasts = np.asarray(approx_contrast_list).reshape(len(angles), len(injection_radii))
     snrs = np.asarray(snrs_list).reshape(len(angles), len(injection_radii))
+    
     return approx_contrasts, snrs
+
+def spatial_binning(img_cube, spatial_bin):
         
+    shape = np.shape(img_cube)
+    array_shape = (shape[0], (2*np.ceil(shape[1]/(2*spatial_bin))).astype(np.int32),\
+                  (2*np.ceil(shape[2]/(2*spatial_bin))).astype(np.int32)) 
+
+    new_cube = np.pad(img_cube, ((0,0),(int(0.5*(spatial_bin*array_shape[1]-shape[1])),\
+                            int(0.5*(spatial_bin*array_shape[1]-shape[1]))),\
+                (int(0.5*(spatial_bin*array_shape[2]-shape[2])),\
+                 int(0.5*(spatial_bin*array_shape[2]-shape[2])))), constant_values=-100)
+    new_cube[new_cube == -100] = np.nan
+    new_cube = np.sum(np.sum(np.reshape(new_cube, (array_shape[0], array_shape[1],\
+                spatial_bin, array_shape[2], spatial_bin)), axis=4), axis=2)
+
+    return new_cube, array_shape
+
+
+def psf_removal_mask(center, inner_radius, outer_radius, width, height):
+    '''
+    Creates circular mask of certain radius in an image of certain width and height
+    '''
+    Y, X = np.ogrid[:height, :width]
+    distance = (np.sqrt((X - center[0])**2 + (Y-center[1])**2) - inner_radius)/outer_radius
+    distance[distance < 0] = 0
+    distance[distance > 1] = 1
+    
+    return 1 - distance
+
 def repairChannelEdges(image, loc):
+        
     '''
     Fill in data for three horizontal channel edges on the NOMIC detector, to prevent artifacting.
     Each channel edge is three rows tall and requires data for each
@@ -1391,6 +1546,7 @@ def repairChannelEdges(image, loc):
     return image
 
 def repairVerticalLine(image, loc):
+        
     '''
     Repair vertical line artifact in the NOMIC detector while preserving the unique noise profile.
     '''
