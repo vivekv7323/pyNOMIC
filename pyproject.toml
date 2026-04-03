@@ -1,0 +1,31 @@
+[project]
+name = "pyNOMIC"
+version = "1.0"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "numpy",
+    "matplotlib",
+    "astropy",
+    "scipy",
+    "pyklip",
+    "vip-hci",
+    "image-registration",
+    "opencv-python",
+    "tqdm",
+    "multiprocessing",
+    "os",
+    "pathlib",
+    "itertools",
+    "psutil",
+    "typing",
+    "enum",
+    "dataclasses"
+]
+requires-python = ">=3.8"
+authors = [
+  {name = "Vivek Vijayakumar", email = "vivekvijayakumar@arizona.edu"}
+]
+
+[tool.setuptools.packages.find]
+include = ["pyNOMIC"]

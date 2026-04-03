@@ -1,17 +1,37 @@
 # pyNOMIC
-## A pipeline for reducing data from the NOMIC camera on the LBT
+## A pipeline for reducing data from LBTI-NOMIC
 
-## Required files: 
-- NOMIC master bad pixel map (`"master_badmap.fits"`)
+# Installation:
 
-## Arguments:
+```
+git clone https://github.com/vivekv7323/pyNOMIC.git
+cd pyNOMIC
+pip install -e .
+```
 
-Example: `python3 rvpipe.py 'data' -c 6 -n 20 -i`
+# Running (examples): 
 
-## Outputs:
+Single sided reduction:
+ Check the notebooks folder for the singlesidedreduction python notebook.
 
-`"{obj}_NOMIC_reduced.npz"`: 
+Double sided reduction:
+ In progress
+# Dependencies:
 
-## Other files:
-
-`"pyNOMIC_reduction.ipynb"`: Jupyter notebook for running the pipeline
+- numpy
+- matplotlib
+- astropy
+- scipy
+- pyklip
+- vip_hci
+- image_registration
+- opencv-python
+- tqdm
+- multiprocessing
+- os
+- pathlib
+- itertools
+- psutil
+- typing
+- enum
+- dataclasses
