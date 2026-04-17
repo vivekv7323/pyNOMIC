@@ -121,6 +121,8 @@ class FileInfoHighPass(object):
             Is set to None in the case of single-sided imaging.
         cold_stop_crop: integer
             Number of pixels to mask along the cold stop in the case of double-sided imaging.
+        binsize: integer
+            Number of pixels for spatial binning.
         """
         
         self.params = params
@@ -143,7 +145,7 @@ class FileInfoHighPass(object):
             The parallactic angle identified from the image header
         """
         
-        highpass_dir, bools, highpassmask, tempflat, obj, skip_target_check, smooth, new_raw_dirs, cold_stop_crop = self.params
+        highpass_dir, bools, highpassmask, tempflat, obj, skip_target_check, smooth, new_raw_dirs, cold_stop_crop, binsize = self.params
 
         hdul = fits.open(file)
 
@@ -188,7 +190,7 @@ class FileInfoHighPass(object):
             chop = "CHOP_NA"
 
         # Obtain parallactic angle
-        para_angle = hdul[0].header['LBT_PARA']
+        para_angle = float(hdul[0].header['LBT_PARA'])
 
         # Get frame median
         frame_median = np.median(hdul[0].data[0])
@@ -196,34 +198,39 @@ class FileInfoHighPass(object):
         # image buffer required for a certain value of the convolution kernel radius
         smooth_buf = int(1.25*smooth)
 
-        # Create copy of image to convolve
-        new_image = np.copy(image)
-
         # Replace bad pixels or nan regions with the median for convolution
-        new_image[~bools] = np.median(image)
-        new_image = np.pad(new_image, smooth_buf, mode='edge')
-
-        # Subtract convolved image from original image
-        filtered_frame = image - convolve_fft(new_image, Box2DKernel(smooth))[smooth_buf:-1*smooth_buf, smooth_buf:-1*smooth_buf]
-
-        # Replace bad pixels or nan regions back with nans
-        filtered_frame[~bools] = np.nan
+        image[~bools] = np.nanmedian(image)
 
         # Use highpass filter mask if available
         if highpassmask is not None:
-            filtered_frame[~highpassmask] = np.nan
+            image[~highpassmask] = np.nan
 
+        # Create copy of image to convolve
+        new_image = np.copy(image)
+
+        # Pad image to prevent the box kernel from introducing an edge gradient
+        new_image = np.pad(new_image, smooth_buf, mode='edge')
+
+        # Subtract convolved image from original image
+        filtered_frame = convolve_fft(image - convolve_fft(new_image, Box2DKernel(smooth))[smooth_buf:-1*smooth_buf, smooth_buf:-1*smooth_buf], Box2DKernel(binsize*3))
+        
         # Do if data is double sided
         if len(new_raw_dirs) == 2:
             
             array_shape = np.shape(filtered_frame)
+
+            sx_filtered_frame = filtered_frame[:int(0.5*array_shape[0]-cold_stop_crop), :]
+            dx_filtered_frame = filtered_frame[cold_stop_crop+int(0.5*array_shape[0]):, :]
+            
+            sx_filtered_frame,_ = hf.spatial_binning([sx_filtered_frame], binsize)
+            dx_filtered_frame,_ = hf.spatial_binning([dx_filtered_frame], binsize)   
             
             # Write high pass images to path
-            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame[:int(0.5*array_shape[0]-cold_stop_crop), :])])
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=sx_filtered_frame[0])])
             newhdul.writeto(os.path.join(highpass_dir[0], "highpass_"+file.name[:-5]+"_sx.fits"), overwrite=True)
             newhdul.close()
             
-            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame[cold_stop_crop+int(0.5*array_shape[0]):, :])])
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=dx_filtered_frame[0])])
             newhdul.writeto(os.path.join(highpass_dir[1], "highpass_"+file.name[:-5]+"_dx.fits"), overwrite=True)
             newhdul.close()
 
@@ -238,8 +245,10 @@ class FileInfoHighPass(object):
             
         else:
 
+            filtered_frame,_ = hf.spatial_binning([filtered_frame], binsize)   
+            
             # Write high pass image to path
-            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame)])
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=filtered_frame[0])])
             newhdul.writeto(os.path.join(highpass_dir, "highpass_"+file.name), overwrite=True)
             newhdul.close()
             
@@ -345,8 +354,10 @@ class SubtractBackground(object):
         ----------------------
         subtracted_dir: string/Path object
             Directory where images will be saved
-        files: list or array 
+        raw_files: list or array 
             List of raw file paths, sorted 
+        psf_subtracted_files: list or array 
+            List of psf subtracted file paths, sorted 
         chops: string array
             List of chop states corresponding to the file list, entries are either "CHOP_A" or "CHOP_B"
         edge_cut: integer
@@ -371,6 +382,8 @@ class SubtractBackground(object):
             List containing the flats for each chop state
         nbg: integer
             Number of frames to use in rolling background subtraction
+        smooth: integer
+            Radius of smoothing kernel, divided by 5
         """
         
         self.params = params
@@ -382,29 +395,25 @@ class SubtractBackground(object):
         ----------------------
         index: integer
             File index to process from 'files'
-
-        Returns: 
-        ---------------------- 
-        TODO
         """     
 
-        subtracted_dir, files, chops, edge_cut, channel_edges, biased_columns, striped_regions,\
-            vertical_biases, horizontal_biases, biased_rows, nanrows, nancols, flats, nbg = self.params
+        subtracted_dir, raw_files, psf_subtracted_files, chops, edge_cut, channel_edges, biased_columns, striped_regions,\
+            vertical_biases, horizontal_biases, biased_rows, nanrows, nancols, flats, nbg, smooth = self.params
 
         # Locate adjacent images of the same chop state
         bg_indices = np.arange(i - 2*nbg + 1, i + 2*nbg, 2)
         # Exclude nonexistent indices and the current index
-        bg_indices = bg_indices[(bg_indices >= 0) & (bg_indices < len(files)) & (bg_indices != i)]
+        bg_indices = bg_indices[(bg_indices >= 0) & (bg_indices < len(raw_files)) & (bg_indices != i)]
 
         # Open image and get array shape
-        unsubtracted = fits.open(files[i])
+        unsubtracted = fits.open(raw_files[i])
         array_shape = np.shape(unsubtracted[0].data[0])
 
         # Create background image from adjacent images (different chop state)    
         bg = np.zeros(array_shape)
         for j in bg_indices:
-            hdul = fits.open(files[j])
-            bg += hdul[0].data[0]
+            hdul = fits.open(psf_subtracted_files[j])
+            bg += hdul[0].data
             hdul.close()
             
         # Averaged background
@@ -461,33 +470,30 @@ class SubtractBackground(object):
         # Adjust array shape with edge removal
         array_shape = (array_shape[0] - 2*edge_cut, array_shape[1] - 2*edge_cut)
 
-        # Locate PSF by finding the maximum and the oversubtracted PSF by finding the minimum
+        # Locate PSF by finding the maximum
         max_indices = np.where(subtracted_frame == np.nanmax(subtracted_frame))
-        min_indices = np.where(subtracted_frame == np.nanmin(subtracted_frame))
-        
+
         maximum = (max_indices[1][0], max_indices[0][0])
-        minimum = (min_indices[1][0], min_indices[0][0])
 
         # Create removal mask for both the PSF and oversubtracted PSF
-        mask = hf.psf_removal_mask((maximum[0], maximum[1]), 32, 35, array_shape[1], array_shape[0]) +\
-                    hf.psf_removal_mask((minimum[0], minimum[1]), 32, 35, array_shape[1], array_shape[0])
+        mask = hf.psf_removal_mask((maximum[0], maximum[1]), 32, 35, array_shape[1], array_shape[0])
 
         # Create background model, use mask to mask out PSF
         new_bg = np.copy(subtracted_frame)
         new_bg = new_bg*(1-mask) + np.nanmedian(new_bg)*(mask)
 
         # Subtract convolved background
-        subtracted_frame = subtracted_frame - convolve_fft(np.pad(new_bg, 50, mode='edge'), Ring2DKernel(25, 20))[50:-50, 50:-50]
+        subtracted_frame = subtracted_frame - convolve_fft(np.pad(new_bg, 50, mode='edge'), Ring2DKernel(5*smooth, 4*smooth))[50:-50, 50:-50]
 
         # Write image to file
         newhdul = fits.HDUList([fits.PrimaryHDU(data=(subtracted_frame))])
-        newhdul.writeto(os.path.join(subtracted_dir, "subtracted_"+files[i].name), overwrite=True)
+        newhdul.writeto(os.path.join(subtracted_dir, "subtracted_"+raw_files[i].name), overwrite=True)
         newhdul.close()
     
         unsubtracted.close()
 
         # Return minimum and maximum locations
-        return minimum, maximum
+        return maximum, True
 
 class RegisterFrames(object):
 
@@ -567,8 +573,10 @@ class RegisterFrames(object):
         offset[0] += (maxima[1][0] - first_maxima[1][0])
         offset[1] += (maxima[0][0] - first_maxima[0][0])
 
+        '''
         # Mask out the oversubtracted PSF
         frame[hf.circular_mask((minima[1][0], minima[0][0]), nan_mask_diameter, len(px)-np.abs(padding[0]), len(py)-np.abs(padding[1]))] = np.nan
+        '''
         frame = hf.align_frame(frame, px, py, padding, offset)
         frame = hf.pad_frame(frame, len(px) + np.abs(center_padding[0]), len(py) + np.abs(center_padding[1]), center_padding)
 
@@ -681,7 +689,7 @@ class EvaluateFrames(object):
 #----------------------------------------
 
 def setup_data(obj, raw_dir, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None, testing=False, test_number=None, start_frame=None,\
-            end_frame = None, skip_target_check=False, background_limit = 28000, threadcount=50, smooth=30, use_temp_flat=True, double_side=False, cold_stop_crop=0):
+            end_frame = None, skip_target_check=False, background_limit = 28000, threadcount=50, smooth=30, use_temp_flat=True, double_side=False, cold_stop_crop=0, binsize=10):
 
     """
     Parameters:
@@ -776,7 +784,7 @@ def setup_data(obj, raw_dir, highpassmask_dir=None, badmap_dir=None, tempflat_di
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
         chops, frame_medians, para_angles = zip(*tqdm(pool.imap(FileInfoHighPass((highpass_dir, bools, highpassmask, tempflat, obj,\
-                                                skip_target_check, smooth, new_raw_dirs, cold_stop_crop)), files), total=len(files)))
+                                                skip_target_check, smooth, new_raw_dirs, cold_stop_crop, binsize)), files), total=len(files)))
     
     if double_side:
         sx_raw_files = np.asarray(sorted(list(pathlib.Path(str(sx_raw_dir)).rglob('*.fits'))))
@@ -808,11 +816,11 @@ def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=
 
     # Get array shape of data
     hdul = fits.open(os.path.join(highpass_dir, "highpass_"+files[0].name))
-    array_shape = np.shape(hdul[0].data)
+    hp_array_shape = np.shape(hdul[0].data)
     hdul.close()
 
     # Create array for storing background frames
-    frames = np.ones((nbg, array_shape[0], array_shape[1]))
+    frames = np.ones((nbg, hp_array_shape[0], hp_array_shape[1]))
 
     # Fill array with first nbg images
     for j in range(nbg):
@@ -823,6 +831,8 @@ def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=
     # Initialize variables
     lastChopPosition = ""
     chopFreeze = False
+
+    maxima, minima = np.zeros((len(files), 2)), np.zeros((len(files), 2))
 
     # Rolling background subtraction
     for i in tqdm(range(len(files))):
@@ -840,22 +850,28 @@ def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=
         # Open image
         image = fits.open(os.path.join(highpass_dir, "highpass_"+files[i].name))
 
+        # Find minimum for future use
+        min_indices = np.where(image[0].data == np.nanmin(image[0].data))
+        minima[i] = min_indices[0][0], min_indices[1][0]
+
         # Subtract background
         subtracted = image[0].data - bg
 
         # Find PSF by finding the maximum
-        indices = np.where(subtracted == np.nanmax(subtracted))
+        max_indices = np.where(subtracted == np.nanmax(subtracted))
+
+        maxima[i] = max_indices[0][0], max_indices[1][0]
         
         if not set_chop_via_bg:
 
             # Calculate chop position based on the position of the star
             if (chop_direction == "UP-DOWN") or (chop_direction == "DIAGONAL"):
-                if indices[0][0] < array_shape[0]/2:
+                if max_indices[0][0] < hp_array_shape[0]/2:
                     chops[i] = "CHOP_A"
                 else:
                     chops[i] = "CHOP_B"
             elif (chop_direction == "LEFT-RIGHT"):
-                if indices[1][0] < array_shape[1]/2:
+                if max_indices[1][0] < hp_array_shape[1]/2:
                     chops[i] = "CHOP_A"
                 else:
                     chops[i] = "CHOP_B"     
@@ -889,10 +905,15 @@ def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=
     
     print("Coadding consecutive repeat chop positions...")
 
+    # Get array shape of data
+    hdul = fits.open(files[0])
+    array_shape = np.shape(hdul[0].data)
+    hdul.close()
+
     # Go through groups
     for group in tqdm(chop_groups):
         
-        frames = np.zeros((1, array_shape[0], array_shape[1]))
+        frames = np.zeros((1, array_shape[1], array_shape[2]))
         count = 0
 
         # Read every image in group until coadd limit is reached and add them
@@ -908,6 +929,8 @@ def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=
                 files[group[0]+i] = ''
                 chops[group[0]+i] = ''
                 para_angles[group[0]+i] = 500
+                maxima[group[0]+i] = 0, 0
+                minima[group[0]+i] = 0, 0
         newhdul = fits.HDUList([fits.PrimaryHDU(data=frames/count)])
         files[group[0]] = pathlib.Path(coadd_dir, files[group[0]].name)
         newhdul.writeto(files[group[0]], overwrite=True)
@@ -916,8 +939,10 @@ def chop_correction(orig_files, highpass_dir, orig_chops, orig_para_angles, nbg=
     files = np.delete(files, np.where(np.asarray(files) == '')[0])
     chops = np.delete(chops, np.where(chops == '')[0])
     para_angles = np.delete(para_angles, np.where(para_angles == 500)[0])
+    maxima = np.delete(maxima, np.where(maxima == 0)[0], 0)*array_shape[1]/hp_array_shape[0]
+    minima = np.delete(minima, np.where(minima == 0)[0], 0)*array_shape[1]/hp_array_shape[0]
 
-    return files, chops, para_angles, orig_chops
+    return files, chops, para_angles, maxima, minima, orig_chops
 
 def chop_finder(orig_files, directory, orig_para_angles, metrics=["locdiff"], coadd_limit = 10,\
                     chop_direction = 'UP-DOWN', threadcount=50):
@@ -1076,42 +1101,47 @@ def chop_finder(orig_files, directory, orig_para_angles, metrics=["locdiff"], co
 
     return files, chops, para_angles, chopstate_derived
 
-def subtract_background(files, chops, edge_cut = 2, channel_edges=[127, 255, 383], biased_columns=[303],\
-                        biased_rows = [], striped_regions=[], vertical_biases=[], horizontal_biases=[], nanrows=[], nancols=[], flats=None, nbg=1, prefix="", threadcount=50):
+def subtract_background(raw_files, psf_subtracted_files, chops, edge_cut = 2, channel_edges=[127, 255, 383], biased_columns=[303],
+                        biased_rows = [], striped_regions=[], vertical_biases=[], horizontal_biases=[], nanrows=[],
+                        nancols=[], flats=None, nbg=1, smooth=5, prefix="", threadcount=50):
     
     """
     Subtract background from adjacent chop frames, divide by flat, perform highpass filter
 
     Parameters:
     ----------------------
-    files: list or array 
+    raw_files: list or array 
         List of raw file paths, sorted 
+    psf_subtracted_files: list or array 
+        List of psf subtracted file paths, sorted 
     chops: string array
         List of chop states corresponding to the file list, entries are either "CHOP_A" or "CHOP_B"
     edge_cut: integer
         Number of pixels to remove at the edges of images
     channel_edges (optional): list
         List containing indices corresponding to channel edges
-    biased_columns: list
+    biased_columns (optional): list
         List containing indices corresponding to biased columns
-    striped_regions: list
+    striped_regions (optional): list
         List containing indices corresponding to regions of the image needing destriping. Each entry contains four integers for slicing the image: [0:1, 2:3]
-    vertical_biases: list
+    vertical_biases (optional): list
         List containing indices corresponding to columns separating regions of the image with different biases
-    horizontal_biases: list
+    horizontal_biases (optional): list
         List containing indices corresponding to rows separating regions of the image with different biases
-    biased_rows: list
+    biased_rows (optional): list
         List containing indices corresponding to biased rows
-    nanrows: list
+    nanrows (optional): list
         List containing indices corresponding to rows that need to be set to np.nan
-    nancols: list
+    nancols (optional): list
         List containing indices corresponding to columns that need to be set to np.nan
-    flats: list
+    flats (optional): list
         List containing the flats for each chop state
-    nbg: integer
+    nbg (optional): integer
         Number of frames to use in rolling background subtraction
+    smooth (optional): integer
+        Radius of smoothing kernel, divided by 5
     prefix (optional): string
-        Prefix to add to file name when saving image.
+        Prefix to add to directory name when saving image.
     threadcount (optional): integer
         Number of threads to employ in multithreading. Default value is 50 threads.
 
@@ -1124,15 +1154,15 @@ def subtract_background(files, chops, edge_cut = 2, channel_edges=[127, 255, 383
     print("Subtracting backgrounds....")
 
     # Create directory to save files
-    root_dir = os.path.dirname(os.path.dirname(files[0]))
+    root_dir = os.path.dirname(os.path.dirname(raw_files[0]))
     subtracted_dir=os.path.join(root_dir, prefix+'subtracted')
     if not os.path.exists(subtracted_dir):
         os.makedirs(subtracted_dir)
 
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        minima, maxima = zip(*tqdm(pool.imap(SubtractBackground((subtracted_dir, files, chops, edge_cut, channel_edges, biased_columns,\
-              striped_regions, vertical_biases, horizontal_biases, biased_rows, nanrows, nancols, flats, nbg)), range(len(files))), total=len(files)))
+        minima, maxima = zip(*tqdm(pool.imap(SubtractBackground((subtracted_dir, raw_files, psf_subtracted_files, chops, edge_cut, channel_edges, biased_columns,\
+              striped_regions, vertical_biases, horizontal_biases, biased_rows, nanrows, nancols, flats, nbg, smooth)), range(len(raw_files))), total=len(raw_files)))
 
     return subtracted_dir 
 
@@ -1150,7 +1180,7 @@ def frame_registration(files, subtracted_dir, prefix='', windowsize=20, nan_mask
     aligned_dir: string/Path object
         Directory where aligned images will be saved
     prefix (optional): string
-        Prefix to add to file name when saving image.
+        Prefix to add to directory name when saving image.
     windowsize (optional): integer
         Half width/height of the reference cutout image (which is 1:1 aspect ratio). Default is 20 pixels.
     nan_mask_size (optional): float
@@ -1250,9 +1280,11 @@ def frame_registration(files, subtracted_dir, prefix='', windowsize=20, nan_mask
     px = np.linspace(0, framew-1+np.abs(padding[0]), framew+np.abs(padding[0]))
     py = np.linspace(0, frameh-1+np.abs(padding[1]), frameh+np.abs(padding[1]))
 
+    '''
     # Set the region around the oversubtracted PSF to nans
     first_frame[hf.circular_mask((first_minima[1][0], first_minima[0][0]), nan_mask_size*reffit[1], framew, frameh)] = np.nan
     second_frame[hf.circular_mask((second_minima[1][0], second_minima[0][0]), nan_mask_size*reffit[1], framew, frameh)] = np.nan
+    '''
 
     # Align first frame
     first_frame = hf.align_frame(first_frame, px, py, padding, first_offset)
@@ -1501,7 +1533,7 @@ def fractional_frame_rejection(psfmaxima, background_dev, fwhms, eccentricities,
     raise ValueError("Exceeded number of iterations!")
 
 
-def frame_binning(aligned_files, frame_bool, chops, para_angles, array_shape, bin=50, threadcount=50, memoryMode=1):
+def frame_binning(aligned_files, frame_bool, chops, para_angles, array_shape, prefix='', bin=50, threadcount=50, memoryMode=1):
 
     """
     Bin frames temporally, and update chop states and parallactic angle.
@@ -1518,6 +1550,8 @@ def frame_binning(aligned_files, frame_bool, chops, para_angles, array_shape, bi
         List of parallactic angles corresponding to each file in 'aligned_files'
     array_shape: integer tuple
         Tuple containing image dimensions, from numpy.shape
+    prefix (optional): string
+        Prefix to add to directory name when saving image.
     bin (optional): integer
         Number of frames to add for each binned frame. Default value is 50 frames.
     threadcount (optional): integer
@@ -1538,7 +1572,7 @@ def frame_binning(aligned_files, frame_bool, chops, para_angles, array_shape, bi
 
     # Create binned directory
     root_dir = os.path.dirname(os.path.dirname(aligned_files[0]))
-    binned_dir=os.path.join(root_dir,'binned')
+    binned_dir=os.path.join(root_dir,prefix+'binned')
 
     if not os.path.exists(binned_dir):
         os.makedirs(binned_dir)

@@ -92,25 +92,32 @@ def spatial_binning(img_cube, spatial_bin):
     array_shape: integer tuple
         Shape of new_cube
     """
+
+    if spatial_bin != 1:
         
-    shape = np.shape(img_cube)
-
-    # Find desired array shape based on the spatial bin required, and the requirement of even image sizes
-    array_shape = (shape[0], (2*np.ceil(shape[1]/(2*spatial_bin))).astype(np.int32),\
-                  (2*np.ceil(shape[2]/(2*spatial_bin))).astype(np.int32)) 
+        shape = np.shape(img_cube)
     
-    # Pad image cube in preparation for binning to the array shape
-    new_cube = np.pad(img_cube, ((0,0),(int(0.5*(spatial_bin*array_shape[1]-shape[1])),\
-                            int(0.5*(spatial_bin*array_shape[1]-shape[1]))),\
-                (int(0.5*(spatial_bin*array_shape[2]-shape[2])),\
-                 int(0.5*(spatial_bin*array_shape[2]-shape[2])))), constant_values=np.nan)
+        # Find desired array shape based on the spatial bin required, and the requirement of even image sizes
+        array_shape = (shape[0], (2*np.ceil(shape[1]/(2*spatial_bin))).astype(np.int32),\
+                      (2*np.ceil(shape[2]/(2*spatial_bin))).astype(np.int32)) 
+        
+        # Pad image cube in preparation for binning to the array shape
+        new_cube = np.pad(img_cube, ((0,0),(int(0.5*(spatial_bin*array_shape[1]-shape[1])),\
+                                int(0.5*(spatial_bin*array_shape[1]-shape[1]))),\
+                    (int(0.5*(spatial_bin*array_shape[2]-shape[2])),\
+                     int(0.5*(spatial_bin*array_shape[2]-shape[2])))), constant_values=np.nan)
+        
+        #new_cube[new_cube == flag_value] = np.nan
     
-    #new_cube[new_cube == flag_value] = np.nan
+        # Perform binning with np.sum and np.reshape
+        new_cube = np.sum(np.sum(np.reshape(new_cube, (array_shape[0], array_shape[1],\
+                    spatial_bin, array_shape[2], spatial_bin)), axis=4), axis=2)
 
-    # Perform binning with np.sum and np.reshape
-    new_cube = np.sum(np.sum(np.reshape(new_cube, (array_shape[0], array_shape[1],\
-                spatial_bin, array_shape[2], spatial_bin)), axis=4), axis=2)
-
+    else:
+        
+        new_cube = img_cube 
+        array_shape = np.shape(img_cube)
+        
     return new_cube, array_shape
 
 
@@ -377,9 +384,9 @@ def airydisk_ravel(xy, amp, rx, ry, offset, p, x0, y0, e=0.11):
     '''
     x, y  = xy
 
-    rad = np.pi*np.sqrt( (((x-x0)*np.cos(p) + (y-y0)*np.sin(p))/rx)**2 + (((x-x0)*np.sin(p) - (y-y0)*np.cos(p))/ry)**2 )
+    rad = np.pi*np.sqrt( (((x-x0)*np.cos(p) + (y-y0)*np.sin(p))/rx)**2 + (((x-x0)*np.sin(p) - (y-y0)*np.cos(p))/ry)**2)
 
-    model = (amp/(1-e**2)**2) * (2*j1(rad)/rad - 2*e*j1(e*rad)/rad)**2
+    model = (amp/(1-e**2)**2) * (2*j1(rad)/rad - 2*e*j1(e*rad)/rad)**2 + offset
 
     model[rad == 0] =  amp/(1-e**2)**2
     
@@ -394,7 +401,7 @@ def airydisk(xy, amp, rx, ry, offset, p, x0, y0, e=0.11):
 
     rad = np.pi*np.sqrt( (((x-x0)*np.cos(p) + (y-y0)*np.sin(p))/rx)**2 + (((x-x0)*np.sin(p) - (y-y0)*np.cos(p))/ry)**2 )
 
-    model = (amp/(1-e**2)**2) * (2*j1(rad)/rad - 2*e*j1(e*rad)/rad)**2
+    model = (amp/(1-e**2)**2) * (2*j1(rad)/rad - 2*e*j1(e*rad)/rad)**2 + offset
 
     model[rad == 0] =  amp/(1-e**2)**2
     
