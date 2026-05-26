@@ -11,11 +11,9 @@ pip install -e .
 
 # Running (examples): 
 
-Single sided reduction:
- Check the notebooks folder for the singlesidedreduction python notebook.
+Check the notebooks folder for python notebooks for both single-sided
+and double-sided reductions. A Read the Docs page is coming soon.
 
-Double sided reduction:
- In progress
 # Dependencies:
 
 - numpy

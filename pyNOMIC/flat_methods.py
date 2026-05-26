@@ -2,14 +2,17 @@
 # IMPORTS
 #----------------------------------------
 
-import numpy as np
 import os, psutil
-from astropy.io import fits
+import numpy as np
 from tqdm.auto import tqdm
+from multiprocessing.pool import ThreadPool as Pool
+
+from astropy.io import fits
+from astropy.convolution import convolve_fft,  Ring2DKernel, Gaussian2DKernel
+
 from scipy.optimize import curve_fit
 from scipy.interpolate import NearestNDInterpolator
-from astropy.convolution import convolve_fft,  Ring2DKernel, Gaussian2DKernel
-from multiprocessing.pool import ThreadPool as Pool
+
 import pyNOMIC.helper_functions as hf
 
 #----------------------------------------
@@ -19,7 +22,7 @@ import pyNOMIC.helper_functions as hf
 class PSFSubtraction(object):
 
     """
-    Tweaked image integration to allow for masking of the target star for constructing a flat.
+    Subtracts stellar psfs from raw images.
     """
 
     def __init__(self, params):
@@ -32,23 +35,33 @@ class PSFSubtraction(object):
         files: list or array 
             List of raw file paths, sorted 
         chops: string array
-            List of chop states corresponding to the file list, entries are either "CHOP_A" or "CHOP_B"
+            List of chop states corresponding to the file list, entries
+            are either "CHOP_A" or "CHOP_B"
         maxima: float tuple array
             Tuples encoding location of the PSF in the images
-        tempflat: 2D numpy array
-            Temporary flat applied to locate the star
         badmap: 2D image array
-            Bad pixel map, where bad pixels are set to 0 and all other pixels are set to 1.
+            Bad pixel map, where bad pixels are set to 0 and all other
+            pixels are set to 1.
+        flat: 2D numpy array
+            Temporary flat applied to locate the star
+        wvl_interp: 1D numpy array
+            An array of wavelengths. 
+        relative_flux: 1D numpy array
+            Relative flux for each respective wavelength in wvl_interp.
+        windowsize: integer
+            Half width/height of the cutout image (which is 1:1 aspect
+            ratio)
         nbg: integer
             Number of frames to use in rolling background subtraction
-        edge_cut: integer
-            Number of pixels to remove at the edges of images
         smooth: integer
             Radius of smoothing kernel, divided by 5
-        windowsize: integer
-            Half width/height of the cutout image (which is 1:1 aspect ratio)
+        edge_cut: integer
+            Number of pixels to remove at the edges of images
+        remove_trefoil: boolean
+            Enables removal of psf residual from trefoil through
+            highpass filtering.
         remove_residual: boolean
-            Enables removal of psf residual through highpass filtering. Disabled by default.
+            Enables removal of psf residual through highpass filtering.
         """
         
         self.params = params
@@ -65,11 +78,12 @@ class PSFSubtraction(object):
         ---------------------- 
         maximum[0]: float
             X-axis location of the maximum
-        maximum[1]: integer
+        maximum[1]: float
             Y-axis location of the maximum
         """
         
-        psf_subtracted_dir, files, chops, maxima, flat, badmap, nbg, edge_cut, smooth, windowsize, remove_residual = self.params
+        (psf_subtracted_dir, files, chops, maxima, badmap, flat, wvl_interp, relative_flux,
+         windowsize, nbg, smooth, edge_cut, remove_trefoil, remove_residual) = self.params
 
         # Locate adjacent images of the same chop state
         bg_indices = np.arange(i - 2*nbg + 1, i + 2*nbg, 2)
@@ -109,35 +123,51 @@ class PSFSubtraction(object):
         subtracted_frame = np.pad(subtracted_frame, edge_cut, mode='edge')
         
         # Subtract convolved background
-        bg_model = convolve_fft(np.pad(subtracted_frame, 10*smooth, mode='edge'), Ring2DKernel(5*smooth, 4*smooth))[10*smooth:-10*smooth, 10*smooth:-10*smooth]
+        bg_model = convolve_fft(np.pad(subtracted_frame, 10*smooth, mode='edge'),
+                                Ring2DKernel(5*smooth, 4*smooth))[10*smooth:-10*smooth,
+                                                                  10*smooth:-10*smooth]
 
+        # Create model grid
         nx = np.linspace(0, array_shape[1]-1, array_shape[1])
         ny = np.linspace(0, array_shape[0]-1, array_shape[0])
         nx, ny = np.meshgrid(nx, ny)
-        
-        wx = np.linspace(0, 2*windowsize-1, 2*windowsize)
-        wy = np.linspace(0, 2*windowsize-1, 2*windowsize)
-        wx, wy = np.meshgrid(wx, wy)
 
         for j in range(2):
-        
+
+            # Perform background subtraction
             new_frame = subtracted_frame - bg_model
-        
+
+            # Create a cutout of the frame
             cutout = new_frame[int(maxima[i][0]-windowsize):int(maxima[i][0]+windowsize),
-                                int(maxima[i][1]-windowsize):int(maxima[i][1]+windowsize)]
-            
+                               int(maxima[i][1]-windowsize):int(maxima[i][1]+windowsize)]
+
+            # Remove nans via interpolation
             mask = np.where(~np.isnan(cutout))
             interp = NearestNDInterpolator(np.transpose(mask), cutout[mask])
             cutout = interp(*np.indices(cutout.shape))
-            
-            # Run curve_fit to get airy best fit parameters
-            reffit, _ = curve_fit(hf.airydisk_ravel, (wx, wy), cutout.ravel(), p0=[np.max(cutout),\
-                        30,30, -1, 0, windowsize, windowsize],\
-                       bounds=([0, 1, 1, 1*-np.inf, 0, 1, 1], [10*np.max(cutout), 200, 200, np.inf, 2*np.pi, 2*windowsize, 2*windowsize]))
-            
-            psf_model = hf.airydisk((nx, ny), reffit[0], reffit[1], reffit[2], reffit[3], reffit[4],\
-                                            int(maxima[i][1])+reffit[5]-windowsize, int(maxima[i][0])+reffit[6]-windowsize) 
-            
+
+            # Fit cutout to get empirical psf parameters
+            reffit, lbtfit, trifit = hf.empirical_psf_fit(cutout, wvl_interp, relative_flux,
+                                                          model_trefoil=remove_trefoil)
+
+            # Get origin of the PSF in the frame
+            origin = (int(maxima[i][1])+reffit[5]-windowsize,
+                      int(maxima[i][0])+reffit[6]-windowsize)
+
+            # Create psf model by integrating over wavelength
+            psf_model = lbtfit[0]*np.mean(hf.modified_airy_disk((nx, ny), relative_flux,
+                                                                wvl_interp, lbtfit[2], lbtfit[3],
+                                                                0, reffit[4], origin[0],
+                                                                origin[1]),
+                                          axis=0) + lbtfit[1]
+
+            if remove_trefoil:
+                # Add trefoil model
+                psf_model += hf.center_triangle((nx, ny), trifit[0], trifit[1], trifit[2],
+                                                trifit[3], trifit[4], origin[0], origin[1],
+                                                trifit[5], trifit[6], ravel=False)
+
+            # Create background model by subtracting the psf model and convolving with ring kernel
             bg_model = convolve_fft(subtracted_frame - psf_model, Ring2DKernel(3*smooth, 2*smooth))
 
         if remove_residual == True:
@@ -146,15 +176,17 @@ class PSFSubtraction(object):
             residual_bg = convolve_fft(residual, Gaussian2DKernel(2))
             
             radius = 1.2*int(np.sqrt(reffit[1]**2 + reffit[2]**2))
-            psfrem = hf.psf_removal_mask(( int(maxima[i][1])+reffit[5]-windowsize, int(maxima[i][0])+reffit[6]-windowsize), radius, 1.2*radius, array_shape[1], array_shape[0])
+            psfrem = hf.psf_removal_mask(origin, radius, 1.2*radius, array_shape[1],
+                                         array_shape[0])
     
-            cirmask = hf.circular_mask(( int(maxima[i][1])+reffit[5]-windowsize, int(maxima[i][0])+reffit[6]-windowsize), radius, array_shape[1], array_shape[0]) ^\
-                        hf.circular_mask(( int(maxima[i][1])+reffit[5]-windowsize, int(maxima[i][0])+reffit[6]-windowsize), 1.2*radius, array_shape[1], array_shape[0])
+            cirmask = (hf.circular_mask(origin, radius, array_shape[1], array_shape[0]) ^
+                       hf.circular_mask(origin, 1.2*radius, array_shape[1], array_shape[0]))
 
             if flat is not None:
                 psf_model = psf_model*flat/np.nanmedian(flat)
     
-            final = (img - psf_model)*(1-psfrem)+(img - psf_model - residual_bg + np.median(residual_bg[cirmask]) )*psfrem
+            final = (img - psf_model)*(1-psfrem) + (img - psf_model - residual_bg +
+                                                    np.median(residual_bg[cirmask]))*psfrem
         else:
             if flat is not None:
                 psf_model = psf_model*flat/np.nanmedian(flat)
@@ -164,43 +196,47 @@ class PSFSubtraction(object):
         
         # Write image to file
         newhdul = fits.HDUList([fits.PrimaryHDU(data=(final))])
-        newhdul.writeto(os.path.join(psf_subtracted_dir, "psfsubtracted_"+files[i].name), overwrite=True)
+        newhdul.writeto(os.path.join(psf_subtracted_dir, "psfsubtracted_"+files[i].name),
+                        overwrite=True)
         newhdul.close()
     
-        return int(maxima[i][0])+reffit[6]-windowsize, int(maxima[i][1])+reffit[5]-windowsize
+        return origin[1], origin[0]
 
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
 
-def create_badmap(files, tolerance=0.9, sigma=.4, edge_cut=3, smooth=30,threadcount=50):
+def create_badmap(files, sigma=.4, smooth=30, edge_cut=3, tolerance=0.9, threadcount=50):
 
     """
-    Create a badmap by constructing a crude flat, running it through a high pass filter, and masking out large deviations.
+    Create a badmap by constructing a crude flat, running it through a
+    high pass filter, and masking out large deviations.
     
     Parameters:
     ----------------------
     files: list or array 
         List of raw file paths to stack.
-    tolerance (optional): float
-        Fraction of available memory to be used for integration.
     sigma (optional): float
         Number of standard deviations to include in the badmap.
-    edge_cut (optional): integer
-        Number of pixels to remove from the edges of the image before high pass filtering. Default value is 3 pixels.
     smooth (optional): integer
-        Outer radius of the smoothing kernel. Default value is 30 pixels.
+        Outer radius of the smoothing kernel.
+        Default value is 30 pixels.
+    edge_cut (optional): integer
+        Number of pixels to remove from the edges of the image before
+        high pass filtering. Default value is 3 pixels.
+    tolerance (optional): float
+        Fraction of available memory to be used for integration.
     threadcount (optional): integer
-        Number of threads to employ in multithreading. Default value is 50 threads.
+        Number of threads to employ in multithreading.
+        Default value is 50 threads.
     
     Returns: 
     ---------------------- 
     flat: 2D image array
         Stacked flat frame.
-        
     badmap: 2D image array
-        Bad pixel map, where bad pixels are set to 0 and all other pixels are set to 1.
-
+        Bad pixel map, where bad pixels are set to 0 and all other
+        pixels are set to 1.
     filtered_frame: 2D image array
         High pass filtered flat from which the badmap was created.
     """
@@ -216,7 +252,7 @@ def create_badmap(files, tolerance=0.9, sigma=.4, edge_cut=3, smooth=30,threadco
     hdul.close()
 
     # Calculate memory buffer based on available memory, size of files, and tolerance
-    buffer = int(np.ceil((file_size*threadcount*len(files))/(tolerance*available)))
+    buffer = int(np.ceil((file_size*threadcount*len(files)) / (tolerance*available)))
 
     print("Creating integrated files for correlation...")
     print("Using a buffer of ", int(len(files)/buffer), " frames...")
@@ -227,8 +263,8 @@ def create_badmap(files, tolerance=0.9, sigma=.4, edge_cut=3, smooth=30,threadco
 
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        bigarr, filecounts = zip(*tqdm(pool.imap(hf.IntegrateFrames((array_shape)), filebufs),\
-                                           desc="integrating files", total=len(filebufs)))
+        bigarr, filecounts = zip(*tqdm(pool.imap(hf.IntegrateFrames((array_shape)), filebufs),
+                                       desc="integrating files", total=len(filebufs)))
 
     # Create flat by mean of the images
     flat = np.sum(bigarr, axis=0)/np.sum(filecounts)
@@ -239,37 +275,45 @@ def create_badmap(files, tolerance=0.9, sigma=.4, edge_cut=3, smooth=30,threadco
 
     # Create copy image and pad it for convolution
     new_image = np.copy(flat)
-    new_image = np.pad(new_image[edge_cut:-1*edge_cut, edge_cut:-1*edge_cut], smooth_buf+edge_cut, mode='edge')
+    new_image = np.pad(new_image[edge_cut:-1*edge_cut, edge_cut:-1*edge_cut],
+                       smooth_buf+edge_cut, mode='edge')
 
     # High pass filter
-    filtered_frame = flat - convolve_fft(new_image, Ring2DKernel(smooth, int(0.8*smooth)))[smooth_buf:-1*smooth_buf, smooth_buf:-1*smooth_buf]
+    filtered_frame = flat - convolve_fft(new_image, Ring2DKernel(smooth, int(0.8*smooth)))\
+                                [smooth_buf:-1*smooth_buf, smooth_buf:-1*smooth_buf]
+    
     #filtered_frame[~bools] = np.nan
 
     # Create badmap by setting pixels above threshold to 0
     badmap = np.ones(np.shape(filtered_frame))
-    badmap[(filtered_frame > (sigma*np.std(filtered_frame)+np.median(filtered_frame))) |\
-            (filtered_frame < (-1*sigma*np.std(filtered_frame)+np.median(filtered_frame)))] = 0
+    badmap[(filtered_frame > (sigma*np.std(filtered_frame)+np.median(filtered_frame))) |
+           (filtered_frame < (-1*sigma*np.std(filtered_frame)+np.median(filtered_frame)))] = 0
 
     return flat, badmap, filtered_frame
 
 def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, threadcount=50):
     
     """
-    Creates a stacked flat frame for each chop state. They are either combined into a single flat or returned separately.
+    Creates a stacked flat frame for each chop state. They are either
+    combined into a single flat or returned separately.
     
     Parameters:
     ----------------------
     files: list or array 
         List of raw file paths to stack.
     chops: list or array
-        List of chop states corresponding to the file list, entries are either "CHOP_A" or "CHOP_B".
-    chop_direction (optional):
-        The chopping direction employed, either "UP-DOWN", "LEFT-RIGHT", or "SEPARATE" if separate flats for each chop are desired.
+        List of chop states corresponding to the file list, entries are
+        either "CHOP_A" or "CHOP_B".
+    chop_direction (optional): string
+        The chopping direction employed, either "UP-DOWN", "LEFT-RIGHT",
+        or "SEPARATE" if separate flats for each chop are desired.
         Default value is "UP-DOWN", used for single-sided imaging.
     tolerance (optional): float
-        Fraction of available memory to be used for integration. Default value is 0.9.
+        Fraction of available memory to be used for integration.
+        Default value is 0.9.
     threadcount (optional): integer
-        Number of threads to employ in multithreading. Default value is 50 threads.
+        Number of threads to employ in multithreading.
+        Default value is 50 threads.
     
     Returns: 
     ---------------------- 
@@ -280,7 +324,6 @@ def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, t
 
     chopa_mean_frame: 2D image array
         Stacked flat frame for CHOP_A
-    
     chopb_mean_frame:   
         Stacked flat frame for CHOP_B
     """
@@ -319,7 +362,8 @@ def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, t
 
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        a_bigarr, a_filecounts = zip(*tqdm(pool.imap(hf.IntegrateFrames((array_shape)), a_filebufs),\
+        a_bigarr, a_filecounts = zip(*tqdm(pool.imap(hf.IntegrateFrames((array_shape)),
+                                                     a_filebufs),
                                            desc="integrating files", total=len(a_filebufs)))
 
     # Create chopa flat by mean of the images
@@ -327,20 +371,23 @@ def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, t
     
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        b_bigarr, b_filecounts = zip(*tqdm(pool.imap(hf.IntegrateFrames((array_shape)), b_filebufs),\
+        b_bigarr, b_filecounts = zip(*tqdm(pool.imap(hf.IntegrateFrames((array_shape)),
+                                                     b_filebufs),
                                            desc="integrating files", total=len(b_filebufs)))
 
     # Create chopb flat by mean of the images
     chopb_mean_frame = np.sum(b_bigarr, axis=0)/np.sum(b_filecounts)
 
-    # Stitch chops together such that the halves of the image without the target are combined together
+    # Stitch chops together such that the halves of the image without the target are combined
     if chop_direction == "UP-DOWN":
 
-        flat = np.concatenate((chopb_mean_frame[:int(array_shape[0]/2), :], chopa_mean_frame[int(array_shape[0]/2):, :]))
+        flat = np.concatenate((chopb_mean_frame[:int(array_shape[0]/2), :],
+                               chopa_mean_frame[int(array_shape[0]/2):, :]))
 
     elif chop_direction == "LEFT-RIGHT":
 
-        flat = np.concatenate((chopb_mean_frame[:, :int(array_shape[1]/2)].T, chopa_mean_frame[:, int(array_shape[1]/2):].T)).T
+        flat = np.concatenate((chopb_mean_frame[:, :int(array_shape[1]/2)].T,
+                               chopa_mean_frame[:, int(array_shape[1]/2):].T)).T
 
     else:
 
@@ -355,10 +402,11 @@ def create_stacked_flat(files, chops, chop_direction="UP-DOWN", tolerance=0.9, t
 
     return flat, chopa_mean_frame, chopb_mean_frame
 
-def subtract_psfs(files, chops, maxima, flat=None, badmap=None, remove_residual=False, windowsize=30, smooth=5, edge_cut=2, nbg=1, threadcount=50, prefix=''):
+def subtract_psfs(files, chops, maxima, stellar_temp, badmap=None, flat=None, windowsize=30, 
+                  nbg=1, smooth=5, edge_cut=2, remove_trefoil=True,
+                  remove_residual=False, prefix='', threadcount=50):
 
     """
-
     Subtracts the stellar PSF from every image.
     
     Parameters (contained inside a tuple):
@@ -366,27 +414,37 @@ def subtract_psfs(files, chops, maxima, flat=None, badmap=None, remove_residual=
     files: list or array 
         List of raw file paths, sorted 
     chops: string array
-        List of chop states corresponding to the file list, entries are either "CHOP_A" or "CHOP_B"
+        List of chop states corresponding to the file list, entries are
+        either "CHOP_A" or "CHOP_B"
     maxima: float tuple array
         Tuples encoding location of the PSF in the images
+    stellar_temp: float
+        Temperature of the star in Kelvins.
+    badmap(optional): 2D image array
+        Bad pixel map, where bad pixels are set to 0 and all other
+        pixels are set to 1.
     flat(optional): 2D numpy array
         Temporary flat applied to locate the star
-    badmap(optional): 2D image array
-        Bad pixel map, where bad pixels are set to 0 and all other pixels are set to 1.
+    windowsize (optional): integer
+        Half width/height of the cutout image
+        (which is 1:1 aspect ratio)
     nbg(optional): integer
         Number of frames to use in rolling background subtraction
-    edge_cut (optional): integer
-        Number of pixels to remove at the edges of images
     smooth (optional): integer
         Radius of smoothing kernel, divided by 5
-    windowsize (optional): integer
-        Half width/height of the cutout image (which is 1:1 aspect ratio)
+    edge_cut (optional): integer
+        Number of pixels to remove at the edges of images
+    remove_trefoil (optional): boolean
+        Enables removal of psf residual from trefoil.
+        Enabled by default.
     remove_residual (optional): boolean
-        Enables removal of psf residual through highpass filtering. Disabled by default.
-    threadcount (optional): integer
-        Number of threads to employ in multithreading. Default value is 50 threads.
+        Enables removal of psf residual through highpass filtering.
+        Disabled by default.
     prefix (optional): string
         Prefix to add to directory name when saving image.
+    threadcount (optional): integer
+        Number of threads to employ in multithreading.
+        Default value is 50 threads.
     """
     
     print("Subtracting psfs....")
@@ -397,10 +455,18 @@ def subtract_psfs(files, chops, maxima, flat=None, badmap=None, remove_residual=
     if not os.path.exists(psf_subtracted_dir):
         os.makedirs(psf_subtracted_dir)
 
+    wvl_interp, relative_flux = hf.calculate_expected_flux(stellar_temp)
+
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        
-        max_x, max_y = zip(*tqdm(pool.imap(PSFSubtraction((psf_subtracted_dir, files, chops, maxima, flat, badmap, nbg, edge_cut,
-                                                             smooth, windowsize, remove_residual)), range(len(files))), total=len(files)))
 
-    return psf_subtracted_dir 
+        max_x, max_y = zip(*tqdm(pool.imap(PSFSubtraction((psf_subtracted_dir, files, chops,
+                                                           maxima, badmap, flat, wvl_interp,
+                                                           relative_flux, windowsize, nbg, smooth, 
+                                                           edge_cut, remove_trefoil,
+                                                           remove_residual)), range(len(files))),
+                                 total=len(files)))
+
+    maxima = np.vstack((np.asarray(max_x), np.asarray(max_y))).T
+
+    return psf_subtracted_dir, maxima
