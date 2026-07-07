@@ -1,9 +1,10 @@
 #----------------------------------------
 # IMPORTS
 #----------------------------------------
-import os
+import os, psutil
 import numpy as np
 from tqdm.auto import tqdm
+from multiprocessing.pool import ThreadPool as Pool
 
 from astropy.io import fits
 from astropy.table import QTable
@@ -12,10 +13,11 @@ import astropy.units as u
 from astropy.convolution import convolve_fft, Gaussian1DKernel
 
 from scipy.special import j1
+from scipy.signal import find_peaks
 from scipy.optimize import curve_fit
-from scipy.interpolate import interp1d
-from scipy.interpolate import RegularGridInterpolator
-
+from scipy.interpolate import (interp1d, CubicSpline,
+                               RegularGridInterpolator,
+                               NearestNDInterpolator)
 #----------------------------------------
 # CLASSES
 #----------------------------------------
@@ -74,6 +76,69 @@ class IntegrateFrames(object):
         
         return stacked_img, count
 
+class FrameBufferIntegration(object):
+    
+    """
+    Class to parallelize image integration with image buffers.
+    """
+
+    def __init__(self, params):
+        
+        """
+        Parameters (contained inside a tuple):
+        ----------------------
+        files: list or array 
+            List of raw file paths to stack
+        indices: 1D numpy array
+            List of indices in which the image cube is sliced into
+            buffers, along their x-axis.
+        array_shape: integer tuple
+            Tuple containing image dimensions, from numpy.shape
+        method: string
+            Method to integrate images, either by taking the "mean"
+            or "median".
+        """
+        
+        self.params = params
+    
+    def __call__(self, i):
+        
+        """
+        Parameters:
+        ----------------------
+        index: integer
+            File index to process from 'files'      
+
+        Returns:
+        ----------------------
+        frame_fragment: 2D numpy array
+            Integrated frame buffer, a fraction of the whole image.
+        """
+
+        files, indices, array_shape, method = self.params
+
+        buf_3D = np.zeros((len(files), indices[i+1] - indices[i], array_shape[1]))        
+        
+        for k in range(len(files)):
+
+            hdul = fits.open(files[k])
+        
+            img = hdul[0].data
+            
+            # Compatibility with both 2D and 3D arrays
+            if img.ndim == 3:
+                img = img[0]
+            buf_3D[k] = img[indices[i]:indices[i+1]]
+    
+            hdul.close()
+
+        if method == "mean":
+            frame_fragment = np.nanmean(buf_3D, axis=0)
+        else:
+            frame_fragment = np.nanmedian(buf_3D, axis=0)
+        
+        return frame_fragment, True
+        
 class MaskFrames(object):
 
     '''
@@ -128,8 +193,8 @@ class MaskFrames(object):
 
         translation = (np.mean(locs[bg_indices], axis=0) - locs[i])
         
-        frame[circular_mask((origin[0] + translation[0], origin[1] + translation[1]),
-                            nan_mask_radius, array_shape[1], array_shape[0])] = np.nan
+        frame[circular_mask((origin[1] + translation[1], origin[0] + translation[0]),
+                            nan_mask_radius, array_shape[0], array_shape[1])] = np.nan
 
         # Write image to path
         newhdul = fits.HDUList([fits.PrimaryHDU(data=frame)])
@@ -142,6 +207,115 @@ class MaskFrames(object):
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
+
+def integrate_files_buffer(files, tolerance=0.9, threadcount=50):
+
+    """
+    Parameters (contained inside a tuple):
+    ----------------------
+    files: list or array 
+        List of raw file paths to stack
+    tolerance (optional): float
+        Fraction of available memory to be used for integration.
+        Default value is 0.9.
+    threadcount (optional): integer
+        Number of threads to employ in multithreading.
+        Default value is 50 threads.
+
+    Returns:
+    ----------------------
+    mean_frame: 2D numpy array
+        Integrated frame.
+    """
+    
+    # Check available memory
+    stats = psutil.virtual_memory()  # returns a named tuple
+    available = float(getattr(stats, 'available'))
+
+    # Open a file and check file_size and image shape
+    hdul = fits.open(files[0])
+    file_size = float(hdul[0].data.nbytes)
+    array_shape = np.shape(hdul[0].data)
+    hdul.close()
+
+    # Force array shape to have correct dimensions
+    if len(array_shape) == 3:
+        array_shape = (array_shape[1], array_shape[2])
+
+    # Calculate memory buffers based on available memory, size of files, and tolerance
+    buffer = int(np.ceil((file_size*threadcount*len(files))/(tolerance*available)))
+
+    print("Creating integrated files for correlation...")
+    print("Using a buffer of ", int(len(files)/buffer), " frames...")
+    
+    # Split files into buffers
+    splitlist = np.linspace(0, len(files), 1+buffer)[1:-1].round().astype(int)
+    filebufs = np.split(files, splitlist)
+
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+        bigarr, filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)),
+                                                     filebufs),
+                                           desc="integrating files", total=len(filebufs)))
+
+    # Create chopa flat by mean of the images
+    mean_frame = np.sum(bigarr, axis=0)/np.sum(filecounts)
+
+    return mean_frame
+
+def integrate_frames_buffer(files, method="median", tolerance=0.9, threadcount=50):
+
+    """
+    Integrates a sequence of frames by dividing the frames themselves into
+    parallelized buffers.
+    
+    Parameters:
+    ----------------------
+    files: list or array 
+        List of raw file paths to stack
+    method (optional): string
+        Method to integrate images, either by taking the "mean"
+        or "median". Default is "median".
+    tolerance (optional): float
+        Fraction of available memory to be used for integration.
+        Default value is 0.9.
+    threadcount (optional): integer
+        Number of threads to employ in multithreading.
+        Default value is 50 threads.
+
+    Returns:
+    ----------------------
+    integrated_frame: 2D numpy array
+        Integrated frame.
+    """
+    
+    # Check available memory
+    stats = psutil.virtual_memory()  # returns a named tuple
+    available = float(getattr(stats, 'available'))
+
+    # Open a file and check file_size and image shape
+    hdul = fits.open(files[0])
+    file_size = float(hdul[0].data.nbytes)
+    array_shape = np.shape(hdul[0].data)
+    hdul.close()
+
+    # Force array shape to have correct dimensions
+    if len(array_shape) == 3:
+        array_shape = (array_shape[1], array_shape[2])
+
+    # Estimate how many chunks the image has to be divided into
+    chunks = int(np.ceil((file_size*threadcount*len(files))/(tolerance*available)))
+
+    # Create indices to divide the image
+    indices = np.linspace(0, array_shape[0], chunks+1).astype(np.int16)
+
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+         frame_fragments,_ = zip(*tqdm(pool.imap(FrameBufferIntegration((files, indices,
+                                                                          array_shape, method)),
+                               range(chunks)), desc="integrating files", total=chunks))
+
+    return np.concatenate(frame_fragments)
 
 def spatial_binning(img_cube, spatial_bin):
 
@@ -192,15 +366,21 @@ def spatial_binning(img_cube, spatial_bin):
         
     return new_cube, array_shape
 
+def distance_map(center, width, height):
+    '''
+    Creates a distance map from a certain origin.
+    '''
+    Y, X = np.ogrid[:width, :height]
+    distance = np.sqrt((X - center[0])**2 + (Y-center[1])**2)
+    
+    return distance
         
 def circular_mask(center, radius, width, height):
     '''
     Creates circular mask of certain radius in an image of
     certain width and height
     '''
-    Y, X = np.ogrid[:height, :width]
-    distance = np.sqrt((X - center[0])**2 + (Y-center[1])**2)
-    mask = distance <= radius
+    mask = distance_map(center, width, height) <= radius
     
     return mask
 
@@ -228,10 +408,10 @@ def psf_removal_mask(center, inner_radius, outer_radius, width, height):
     """
 
     # create grid
-    Y, X = np.ogrid[:height, :width]
+    Y, X = np.ogrid[:width, :height]
 
     # Define pixels on distance from center, normalized with inner and outer radius
-    distance = (np.sqrt((X - center[0])**2 + (Y-center[1])**2) - inner_radius) / outer_radius
+    distance = (distance_map(center, width, height) - inner_radius) / outer_radius
 
     # Set all values inside outer radius to 0, set all values outside the radius to 1
     distance[distance < 0] = 0
@@ -240,8 +420,111 @@ def psf_removal_mask(center, inner_radius, outer_radius, width, height):
     # Reverse image mask
     return 1 - distance
 
+def chop_subtraction(img, index, chop, files, highfreqflats, nbg, resflats=None,
+                     flat_offsets=None, correction_method="division"):
 
-def repairChannelEdges(image, loc, method="linear"):
+    """
+    Parameters (contained inside a tuple):
+    ----------------------
+    img: 2D image array
+        Image that needs to be chop subtracted.
+    index: integer
+        Index of image file in files.
+    chop: string
+        Chop state of img.
+    files: list or array 
+        List of file paths, sorted 
+    highfreqflats: list
+        List containing the untranslated flats for each chop state,
+        which should have the high frequency portion of the total flat
+    nbg: integer
+        Number of frames to use in rolling background subtraction
+    resflats (optional): list
+        List containing low frequency flats for correcting chop 
+        residuals for each chop state.
+    flat_offsets (optional): 2D numpy array
+        List of tuples containing the offsets of the background
+        with respect to the flat.
+    correction_method (optional): string
+        Method by which to apply background model correction.
+        Options are either "subtraction" or "division",
+        "division" is the default.
+    """
+
+    # Create flats from high frequency flats
+    flats = np.copy(highfreqflats)
+
+    # Locate adjacent images of differing chop state
+    bg_indices = np.arange(index - 2*nbg + 1, index + 2*nbg, 2)
+    
+    # Exclude nonexistent indices and the current index
+    bg_indices = bg_indices[(bg_indices >= 0) & (bg_indices < len(files)) &
+                            (bg_indices != index)]
+
+    # Use appropriate flat depending on the chop state, adjacent image is of a different chop
+    if chop == "CHOP_A":
+        img_flat_index = 0
+        bg_flat_index = 1
+    else:
+        img_flat_index = 1
+        bg_flat_index = 0
+
+    # Create alignment grid
+    frameh, framew = np.shape(img)
+    px = np.linspace(0, framew-1, framew)
+    py = np.linspace(0, frameh-1, frameh)
+
+    # Create background image from adjacent images (different chop state)    
+    bg = np.zeros(np.shape(img))
+    for j in bg_indices:
+        hdul = fits.open(files[j])
+        sub = hdul[0].data
+        if sub.ndim == 3:
+            sub = sub[0]
+        if flat_offsets is not None:
+            # Align flat to image
+            bg_flat = align_frame(resflats[bg_flat_index], px, py, (0,0),
+                                  -1*flat_offsets[j], method="linear")
+            # Remove nans via interpolation
+            mask = np.where(~np.isnan(bg_flat))
+            interp = NearestNDInterpolator(np.transpose(mask), bg_flat[mask])
+            bg_flat = interp(*np.indices(bg_flat.shape)) + flats[bg_flat_index]
+        else:
+            bg_flat = flats[bg_flat_index]
+        if correction_method == "division":
+            bg += np.nanmedian(bg_flat) * sub / bg_flat
+        elif correction_method == "subtraction":
+            bg += np.nanmedian(bg_flat) + sub - bg_flat
+        else:
+            raise ValueError("Undefined correction method")
+        hdul.close()
+
+    # Averaged background
+    bg = bg / len(bg_indices)
+
+    if flat_offsets is not None:
+        # Align flat to image
+        img_res_flat = align_frame(resflats[img_flat_index], px, py, (0,0),
+                          -1*flat_offsets[index], method="linear")
+        # Remove nans via interpolation
+        mask = np.where(~np.isnan(img_res_flat))
+        interp = NearestNDInterpolator(np.transpose(mask), img_res_flat[mask])
+        img_res_flat = interp(*np.indices(img_res_flat.shape))
+        # Add to high frequency flat
+        flats[img_flat_index] += img_res_flat
+        
+    # Flat correction
+    if correction_method == "division":
+        subtracted_frame = np.nanmedian(flats[img_flat_index]) * img / flats[img_flat_index] - bg
+    elif correction_method == "subtraction":
+        subtracted_frame = np.nanmedian(flats[img_flat_index]) + img - flats[img_flat_index] - bg
+    else:
+        raise ValueError("Undefined correction method")
+
+    return subtracted_frame
+
+    
+def repair_channel_edges(image, loc, method="linear"):
         
     """
     Fill in data for three horizontal channel edges on the NOMIC
@@ -302,7 +585,7 @@ def repairChannelEdges(image, loc, method="linear"):
     return image
 
 
-def repairVerticalLine(image, loc, ref=None, return_ref=False, stddev=5):
+def repair_vertical_line(image, loc, ref=None, return_ref=False, stddev=5):
         
     """
     Repair vertical line artifact in the NOMIC detector while preserving
@@ -348,8 +631,7 @@ def repairVerticalLine(image, loc, ref=None, return_ref=False, stddev=5):
     else:
         return image
 
-
-def repairHorizontalLine(image, loc, ref=None, return_ref=False, stddev=5):
+def repair_horizontal_line(image, loc, ref=None, return_ref=False, stddev=5):
         
     """
     Repair horizontal line artifact in the NOMIC detector while
@@ -395,8 +677,7 @@ def repairHorizontalLine(image, loc, ref=None, return_ref=False, stddev=5):
     else:
         return image
 
-
-def repairVerticalBias(image, loc, ref=None, return_ref=False):
+def repair_vertical_bias(image, loc, ref=None, return_ref=False):
     
     """
     Offset bias between two sides of the detector, column-wise.
@@ -443,7 +724,7 @@ def repairVerticalBias(image, loc, ref=None, return_ref=False):
     else:
         return image
     
-def repairHorizontalBias(image, loc, ref=None, return_ref=False):
+def repair_horizontal_bias(image, loc, ref=None, return_ref=False):
     
     """
     Offset bias between two sides of the detector, row-wise.
@@ -529,7 +810,7 @@ def Circular_Gaussian2D(xy, amp, sigma, offset, x0, y0, ravel=True):
     
     model = (offset + amp*np.exp(-1*((x-x0)**2 + (y-y0)**2)/sigma))
     
-    if ravel == True:
+    if ravel:
         return model.ravel()
     else:
         return model
@@ -542,7 +823,7 @@ def Gaussian2D(xy, amp, sigmax, sigmay, offset, x0, y0, ravel=True):
 
     model = (offset + amp*np.exp(-1*((x-x0)**2/sigmax + (y-y0)**2/sigmay)))
     
-    if ravel == True:
+    if ravel:
         return model.ravel()
     else:
         return model
@@ -557,11 +838,15 @@ def airy_disk(xy, amp, sigmax, sigmay, offset, p, x0, y0, e=0.11, ravel=True):
     rad = np.pi*np.sqrt((((x-x0)*np.cos(p) + (y-y0)*np.sin(p))/sigmax)**2 +
                         (((x-x0)*np.sin(p) - (y-y0)*np.cos(p))/sigmay)**2)
 
-    model = (amp/(1-e**2)**2) * (2*j1(rad)/rad - 2*e*j1(e*rad)/rad)**2 + offset
+    model = (2*j1(rad)/rad - 2*e*j1(e*rad)/rad)**2
+    
+    model[rad == 0] =  (1-e**2)**2
 
-    model[rad == 0] =  amp/(1-e**2)**2
+    model = amp*model
 
-    if ravel == True:
+    model += offset
+
+    if ravel:
         return model.ravel()
     else:
         return model
@@ -583,9 +868,9 @@ def modified_airy_disk(xy, amp, wavelength, aperture, axis_ratio, offset, p, x0,
 
         model = (2*j1(rad)/rad - 2*e*j1(e*rad)/rad)**2
         
-        model[rad == 0] =  1
+        model[rad == 0] =  (1-e**2)**2
 
-        model = model*(amp/(1-e**2)**2)
+        model = amp*model
 
         model += offset
 
@@ -599,9 +884,9 @@ def modified_airy_disk(xy, amp, wavelength, aperture, axis_ratio, offset, p, x0,
 
         model = (2*j1(rad)/rad - 2*e*j1(e*rad)/rad)**2
         
-        model[rad == 0] =  1
+        model[rad == 0] =  (1-e**2)**2
         
-        model =  np.einsum('i,ijk->ijk', (amp/(1-e**2)**2), model)
+        model =  np.einsum('i,ijk->ijk', amp, model)
 
         model += offset
 
@@ -632,12 +917,12 @@ def center_triangle(xy, amp, amp2, sigma, sigma2, phase, x0, y0, r0, r02, ravel=
     model =  (sinc_gauss(xy, amp, sigma, phase, x0, y0, r0, 0, 1) +
                 sinc_gauss(xy, amp2, sigma2, phase + np.pi, x0, y0, r02, 0, 1))
     
-    if ravel == True:
+    if ravel:
         return model.ravel()
     else:
         return model
 
-def empirical_psf_fit(cutout, wvl_interp, relative_flux, model_trefoil=True):
+def empirical_psf_fit(cutout, wvl_interp, relative_flux, model_trefoil=True, use_error=True):
 
     """
     Fit an empirically derived PSF to an image cutout.
@@ -652,6 +937,10 @@ def empirical_psf_fit(cutout, wvl_interp, relative_flux, model_trefoil=True):
         Relative flux for each respective wavelength in wvl_interp.
     model_trefoil (optional): boolean
         Enables the modeling of trefoil in the PSF. Enabled by default.
+    use_error (optional): boolean
+        Enables the computation of errors for the cutout based on
+        distance from the origin and the standard deviation of the 
+        cutout.
 
     Returns:
     ----------------------    
@@ -709,57 +998,84 @@ def empirical_psf_fit(cutout, wvl_interp, relative_flux, model_trefoil=True):
     wx = np.linspace(0, cutout_shape[0]-1, cutout_shape[0])
     wy = np.linspace(0, cutout_shape[1]-1, cutout_shape[1])
     wx, wy = np.meshgrid(wx, wy)
-        
-    # Run curve_fit to get airy best fit parameters
-    reffit, _ = curve_fit(airy_disk, (wx, wy), cutout.ravel(), p0=[np.max(cutout), 30,30, -1, 0,
-                          0.5*cutout_shape[0], 0.5*cutout_shape[1]],
-                          bounds=([0, 1, 1, 1*-np.inf, 0, 1, 1],
-                                  [10*np.max(cutout), 200, 200, np.inf, 2*np.pi,
-                                   cutout_shape[0], cutout_shape[1]]))
 
+    if use_error:
+        error = distance_map((0.5*cutout_shape[1]-0.5, 0.5*cutout_shape[0]-0.5), cutout_shape[0],
+                         cutout_shape[1]).ravel()
+        error *= np.std(cutout) / np.max(error)
+    else:
+        error = None
+        
+    try:
+        # Run curve_fit to get airy best fit parameters
+        reffit, _ = curve_fit(airy_disk, (wx, wy), cutout.ravel(), sigma=error,
+                              p0=[np.max(cutout), 30,30, -1,
+                                  0, 0.5*cutout_shape[0], 0.5*cutout_shape[1]],
+                              bounds=([0, 1, 1, 1*-np.inf, 0, 1, 1],
+                                      [10*np.max(cutout), 100, 100, np.inf, 2*np.pi,
+                                       cutout_shape[0], cutout_shape[1]]))
+    except:
+        return np.full(7, np.nan), np.full(4, np.nan), np.full(7, np.nan)
+        
     # Create wrapper for modified_airy_disk function, input best fits from the airy_disk function
     def mod_wrapper(xy, amp, offset, aperture, axis_ratio, ravel=True):
 
         model = (amp*np.mean(modified_airy_disk(xy, relative_flux, wvl_interp, aperture,
                                                 axis_ratio, 0, reffit[4], reffit[5],
-                                                reffit[6]), axis=0) +
+                                                reffit[6]), axis=0)/np.mean(relative_flux) +
                  offset)
         
-        if ravel == True:
+        if ravel:
             return model.ravel()
         else:
             return model
 
-    # Run curve_fit using the wrapper to get modified airy best fit parameters
-    lbtfit, _ = curve_fit(mod_wrapper, (wx, wy), cutout.ravel(), p0=[reffit[0], reffit[3], 8, 1],
-                          bounds=([0, 1*-np.inf,6, .5], [10*np.max(cutout), np.inf, 10, 2]))  
+    try:
+        # Run curve_fit using the wrapper to get modified airy best fit parameters
+        lbtfit, _ = curve_fit(mod_wrapper, (wx, wy), cutout.ravel(),
+                              p0=[reffit[0], reffit[3], 8, 1],
+                              bounds=([0, 1*-np.inf,6, .5], [10*np.max(cutout), np.inf, 10, 2]))  
+    except:
+        lbtfit = np.full(4, np.nan)
 
     if model_trefoil:
 
-        # Create PSF model using best fit parameters
-        lbt_model = mod_wrapper((wx,wy), lbtfit[0], lbtfit[1], lbtfit[2], lbtfit[3], ravel=False)
+        try:
+            # Create wrapper for center_triangle, input best fits from the airy_disk function
+            def tri_wrapper(xy, amp, amp2, sigma, sigma2, phase, r0, r02):
+    
+                return center_triangle(xy, amp, amp2, sigma, sigma2, phase, reffit[5], reffit[6],
+                                       r0, r02)
 
-        # Create wrapper for center_triangle, input best fits from the airy_disk function
-        def tri_wrapper(xy, amp, amp2, sigma, sigma2, phase, r0, r02):
-
-            return center_triangle(xy, amp, amp2, sigma, sigma2, phase, reffit[5], reffit[6], r0, r02)
-
-        # Calculate model residual
-        residual = cutout - lbt_model
+            # Create PSF model using best fit parameters
+            if np.isnan(lbtfit[0]):
+                
+                lbt_model = airy_disk((wx,wy), reffit[0], reffit[1], reffit[2], reffit[3],
+                                      reffit[4], reffit[5], reffit[6], ravel=False)
+                
+            else:
+                
+                lbt_model = mod_wrapper((wx,wy), lbtfit[0], lbtfit[1], lbtfit[2], lbtfit[3],
+                                        ravel=False)
+        
+            # Calculate model residual
+            residual = cutout - lbt_model
+                
+            # Run curve_fit to get best fit parameters of trefoil from the residual
+            trifit, _ = curve_fit(tri_wrapper, (wx, wy), residual.ravel(),
+                                  p0=[1e-4, 1e-4, 9, 9, 5.2, 14.38, 14.38*np.sqrt(3)],
+                                  bounds=([0, 0, 1, 1, 0, 1, 1],
+                                          [10*np.max(cutout),10*np.max(cutout),
+                                           20, 20, 2*np.pi, 40, 40]),
+                                  maxfev=10**5)
             
-        # Run curve_fit to get best fit parameters of trefoil from the residual
-        trifit, _ = curve_fit(tri_wrapper, (wx, wy), residual.ravel(),
-                              p0=[1e-4, 1e-4, 9, 9, 5.2, 14.38, 14.38*np.sqrt(3)],
-                              bounds=([0, 0, 1, 1, 0, 1, 1],
-                                      [10*np.max(cutout),10*np.max(cutout),
-                                       20, 20, 2*np.pi, 80, 80]),
-                              maxfev=10**5)
-        
-        return reffit, lbtfit, trifit
-        
+            return reffit, lbtfit, trifit
+
+        except:
+            return reffit, lbtfit, np.full(7, np.nan)
+            
     else:
-        
-        return reffit, lbtfit, []
+        return reffit, lbtfit, np.full(7, np.nan)
 
 def pad_frame(frame, px, py, padding):
     
@@ -853,6 +1169,91 @@ def align_frame(frame, px, py, padding, offset, method="cubic"):
     image = interp((X, Y))
 
     return image
+
+def calc_para_angles(lbt_lst, lbt_ra, lbt_dec):
+    
+    """
+    Calculates parallactic angles from "LBT_LST",
+    "LBT_RA", and "LBT_DEC" header points.
+
+    Parameters:
+    ----------------------
+    lbt_lst: string
+        Local standard time from the LBT FITS header.
+    lbt_ra: string
+        Right ascension from the LBT FITS header.
+    lbt_dec: integer
+        Declination from the LBT FITS header.
+
+    Returns:
+    ----------------------    
+    para_angle: float
+        Parallactic angle in degrees.
+    """
+    
+    latitude  = 32.7013888889*np.pi/180
+    longitude = -109.889166667*np.pi/180
+    
+    declination = (int(lbt_dec[:3])*np.pi/180 +
+                   int(lbt_dec[4:6])*np.pi/(180*60) +
+                   float(lbt_dec[7:])*np.pi/(180*3600))
+    
+    hour_angle = ((int(lbt_lst[:3]) - int(lbt_ra[:3])) * np.pi/12 +
+                  (int(lbt_lst[4:6]) - int(lbt_ra[4:6])) * np.pi/720 +
+                  (float(lbt_lst[7:]) -
+                   float(lbt_ra[7:])) * np.pi/(720*60))
+    
+    para_angle = 180*np.arctan2(np.sin(hour_angle),
+                                (np.tan(latitude)*np.cos(declination) -
+                                 np.sin(declination)*
+                                 np.cos(hour_angle)))/np.pi
+    return para_angle
+
+def image_groups(times, positions, smooth=100):
+
+    """
+    Splits
+
+    Parameters:
+    ----------------------
+    times: 1D numpy array
+        End observation times corresponding to each position.
+    positions: 1D numpy array
+        Image star positions.
+
+    Returns:
+    ----------------------    
+    img_group_times: list of numpy arrays
+        End observation times, split into groups
+    image_group_pos: list of numpy arrays
+        Image star positions, split into groups
+    """
+    
+    print("Image groups: ")
+    
+    spline = CubicSpline(times, convolve_fft(positions, Gaussian1DKernel(smooth)))
+    xlist = np.linspace(times[0], times[-1], 10**5)
+    
+    derivative = np.abs(convolve_fft(spline(xlist, 1), Gaussian1DKernel(smooth)))
+    cut = 5*np.std(derivative[derivative < 2*np.mean(derivative)])
+    
+    peaks,_ = find_peaks(derivative, prominence=cut)
+    split_locs = []
+
+    for i in range(len(peaks)):
+    
+        split_locs.append(np.where((xlist[peaks[i]] - times)==
+                                  np.max((xlist[peaks[i]] -
+                                          times)[(xlist[peaks[i]] -
+                                                              times) < 0]) )[0][0])
+        
+    img_group_times = (np.split(times,  split_locs))
+    img_group_pos = np.split(positions,  split_locs)
+
+    for i in range(len(img_group_times)):
+        print("Image group "+str(i)+": ", 100*len(img_group_times[i])/len(positions))
+
+    return img_group_times, img_group_pos
 
 def calculate_expected_flux(stellar_temp, nomic_filter = "Nprime",
                                  min_cutoff=0.05, n_interp=30):
@@ -958,4 +1359,3 @@ def stellar_flux_density(wavelengths, distance, stellar_radius, stellar_temp):
     '''
     
     return spectral_flux_density
-    
