@@ -104,24 +104,12 @@ class InjectSource(object):
             hdul.close()
 
         if highpassrad is not None:
-
+            
             fwhm = 2*np.sqrt(2*np.log(2)*(reffit[1]+reffit[2]))*pxscale
-            
-            # Create mask to mask out star
-            max_mask =  hf.circular_mask((psf_loc[0], psf_loc[1]), 1.1*fwhm,
-                                         array_shape[0], array_shape[1])
-            max_aperture = hf.circular_mask((psf_loc[0], psf_loc[1]),
-                                            1.1*1.1*fwhm, array_shape[0],
-                                            array_shape[1]) ^ max_mask
-            
-            new_bg = np.copy(img)
-            new_bg[max_mask] = np.median(new_bg[max_aperture])
 
-            # Perform high pass filtering
-            img = img - convolve_fft(np.pad(new_bg, 50, mode='edge'),
-                                     Ring2DKernel(int(highpassrad*5/4),
-                                                  highpassrad))[50:-50, 50:-50]
-    
+            img = hf.simple_highpass(img, psf_loc, array_shape,
+                                     highpassrad, fwhm)
+            
         if directory is not None:
             # Save image to file
             newhdul = fits.HDUList([fits.PrimaryHDU(data=(img))])      
@@ -159,8 +147,8 @@ class ForwardModel(object):
         curve_prior: 1D numpy array
             A contrast curve used as a starting assumption for performing
             SNR measurements.
-        aperture_size: integer
-            Size of SNR measurement apertures in pixels.
+        aperture_radius: integer
+            Radius of SNR measurement apertures in pixels.
         ncomp: integer
             Number of KLIP components.
         delta_rot: float
@@ -204,8 +192,9 @@ class ForwardModel(object):
             to last_contrast.
         """
         
-        (frames, para_angles, reffits, array_shape, curve_prior, aperture_size, ncomp, delta_rot,
-         n_segments, highpassrad, tolerance, high_buffer, max_iterations, add_info) = self.params                    
+        (frames, para_angles, reffits, array_shape, curve_prior,
+         aperture_radius, ncomp, delta_rot, n_segments, highpassrad,
+         tolerance, high_buffer, max_iterations, add_info, nproc) = self.params                    
 
         # Initialize using buffer and assumed prior for contrast curve
         last_contrast = high_buffer*curve_prior(coords[0])
@@ -224,21 +213,21 @@ class ForwardModel(object):
             try:
                 
                 (injected_cube,
-                 injected_shape) = inject_source(image_cube, para_angles, reffits, array_shape,
+                 injected_shape) = inject_source(frames, para_angles, reffits, array_shape,
                                                  contrast=last_contrast,
                                                  injection_radius=coords[0],
                                                  injection_angle=coords[1],
-                                                 crop_size=2*int(np.ceil(1.05*(coords[1]+
-                                                                               aperture_size))),
+                                                 crop_size=2*int(np.ceil(1.05*(coords[0]+
+                                                                               aperture_radius))),
                                                  highpassrad=highpassrad, save_files=False,
-                                                 threadcount=1)
+                                                 threadcount=nproc)
 
                 # Get measured SNR with assumed contrast
                 (curr_snr,
-                 curr_noise_factor) = measure_snr(injected_cube, para_angles, aperture_size,
+                 curr_noise_factor) = measure_snr(injected_cube, para_angles, aperture_radius,
                                                   coords[0], coords[1], ncomp=ncomp,
                                                   delta_rot=delta_rot, n_segments=n_segments,
-                                                  nproc=1)
+                                                  nproc=nproc)
 
                 # Add SNRs and contrasts to plot
                 snr_plot = np.append(snr_plot, curr_snr)
@@ -307,7 +296,6 @@ class ForwardModel(object):
                             # If first data point, adjust based on proportion
                             curr_approx_contrast = np.abs((5/curr_snr)*(last_contrast))
 
-                   
                     else:
                         if len(snr_plot) > 1:
                             
@@ -319,14 +307,16 @@ class ForwardModel(object):
                                 
                                 anticorrelation = True
                                 curr_approx_contrast = 0.25*last_contrast
-                                
-                            if (((snr_plot[-1] > snr_plot[-2]) &
-                                 (contrast_plot[-1] > contrast_plot[-2])) or
-                                ((snr_plot[-1] < snr_plot[-2]) &
-                                 (contrast_plot[-1] < contrast_plot[-2]))):
-                                
+
+                            else:
                                 correlation = True
                                 curr_approx_contrast = 2*last_contrast
+                                '''
+                                if (((snr_plot[-1] > snr_plot[-2]) &
+                                     (contrast_plot[-1] > contrast_plot[-2])) or
+                                    ((snr_plot[-1] < snr_plot[-2]) &
+                                     (contrast_plot[-1] < contrast_plot[-2]))):
+                                '''
                         else:
                              # If SNR is too low, boost contrast by a factor of 2
                             curr_approx_contrast = 2*last_contrast
@@ -357,7 +347,8 @@ class ForwardModel(object):
                     curr_snr = snr_plot[np.nanargmin(np.abs(snr_plot - 5))]
                     
                 except:
-                    
+                    print("Contrasts: ", contrast_plot)
+                    print("SNRs: ", snr_plot)
                     last_contrast = np.nan
                     curr_snr = np.nan
                     
@@ -529,7 +520,7 @@ def inject_source(frames, para_angles, reffits, array_shape,
             return injected_cube, array_shape
 
 
-def measure_snr(image_cube, para_angles, aperture_size, source_radius, source_angle,
+def measure_snr(image_cube, para_angles, aperture_radius, source_radius, source_angle,
                 ncomp=10, delta_rot=0, n_segments=1, nproc=None):
    
     """
@@ -542,8 +533,8 @@ def measure_snr(image_cube, para_angles, aperture_size, source_radius, source_an
     para_angles: list or array
         List of parallactic angles corresponding to each frame
         in the cube.
-    aperture_size:
-        Size of SNR measurement apertures in pixels.
+    aperture_radius: integer
+        Radius of SNR measurement apertures in pixels.
     source_radius: float
         Radius from the stellar psf where the source is located
     source_angle: float
@@ -573,29 +564,31 @@ def measure_snr(image_cube, para_angles, aperture_size, source_radius, source_an
     origin = [cube_shape[2]/2 - 0.5, cube_shape[1]/2 - 0.5]
     
     '''
-    IWA_mask =  hf.circular_mask(origin, aperture_size, cube_shape[1], cube_shape[2])
+    IWA_mask =  hf.circular_mask(origin, aperture_radius, cube_shape[1], cube_shape[2])
     med_image_unsubtracted = np.nanmedian(image_cube, axis=0)
     stellar_flux = np.nansum(med_image_unsubtracted[IWA_mask])
     stellar_peak_flux = np.nanmax(med_image_unsubtracted[IWA_mask])
     '''
 
+    image_cube[np.isnan(image_cube)] = 0
+    
     # Do PCA on the relevant annulus
     if delta_rot == 0 and n_segments <= 1:
     
         med_image = pca_annulus(image_cube, para_angles, ncomp=ncomp, r_guess=source_radius,
-                                annulus_width=1.05*2*aperture_size, n_segments=n_segments,
+                                annulus_width=1.05*2*aperture_radius,
                                 nproc=nproc, svd_mode='eigen', imlib='opencv')
     
     else:
         
-        med_image = pca_annular(image_cube, para_angles, fwhm=aperture_size*2, ncomp=ncomp,
-                                asize=1.05*2*aperture_size, verbose=False, delta_rot=delta_rot,
-                                radius_int=source_radius-aperture_size, n_segments=n_segments,
+        med_image = pca_annular(image_cube, para_angles, fwhm=aperture_radius*2, ncomp=ncomp,
+                                asize=1.05*2*aperture_radius, verbose=False, delta_rot=delta_rot,
+                                radius_int=source_radius-aperture_radius, n_segments=n_segments,
                                 nproc=nproc, svd_mode='eigen', imlib='opencv')
 
     # Compute angles at which to create apertures
     circle_pos = np.linspace(0, 2*np.pi,
-                             int(np.floor(np.pi*source_radius/aperture_size))+1)[:-1]
+                             int(np.floor(np.pi*source_radius/aperture_radius))+1)[:-1]
     fluxes = np.zeros(len(circle_pos))
 
     # Measure flux in each aperture by creating a mask
@@ -605,7 +598,7 @@ def measure_snr(image_cube, para_angles, aperture_size, source_radius, source_an
                                                                   source_angle*np.pi/180),
                               origin[1] + source_radius*np.sin(circle_pos[i] +
                                                                   source_angle*np.pi/180)),
-                             aperture_size, np.shape(med_image)[0], np.shape(med_image)[1])
+                             aperture_radius, np.shape(med_image)[0], np.shape(med_image)[1])
         if i == 0:
 
             source_peak_flux = (np.nanmax(med_image[mask]))
@@ -622,10 +615,10 @@ def measure_snr(image_cube, para_angles, aperture_size, source_radius, source_an
 #------------------------
 
 def contrast_curve(frames, para_angles, reffits, array_shape, curve_prior,
-                   injection_radii, injection_angles, aperture_size,
+                   injection_radii, injection_angles, aperture_radius,
                    ncomp=5, delta_rot=0, n_segments=1, highpassrad=None,
                    tolerance=0.05, high_buffer=2, max_iterations=10, 
-                   add_info=[None, None], threadcount=6):
+                   add_info=[None, None], nproc=1, threadcount=6):
     """
     Computes a contrast curve for an image sequence.
     
@@ -647,8 +640,8 @@ def contrast_curve(frames, para_angles, reffits, array_shape, curve_prior,
         Radii from the stellar psf in which to inject sources.
     injection_angles: 1D numpy array
         Position angles at which to inject sources.
-    aperture_size: integer
-        Size of SNR measurement apertures in pixels.
+    aperture_radius: integer
+        Radius of SNR measurement apertures in pixels.
     ncomp (optional): integer
         Number of KLIP components.
     delta_rot (optional): float
@@ -670,6 +663,8 @@ def contrast_curve(frames, para_angles, reffits, array_shape, curve_prior,
         calculating source SNR.
     add_info (optional): list
         Additional information to include in error files.
+    nproc (optional): integer
+        Number of processors to employ in vip_hci pca implementations.
     threadcount (optional): integer
         Number of threads to employ in multithreading.
         Default value is 6 threads.        
@@ -692,10 +687,10 @@ def contrast_curve(frames, para_angles, reffits, array_shape, curve_prior,
             (approx_contrast_list,
              snrs_list) = zip(*tqdm(pool.imap(ForwardModel((frames, para_angles, reffits,
                                                             array_shape, curve_prior,
-                                                            aperture_size, ncomp, delta_rot,
+                                                            aperture_radius, ncomp, delta_rot,
                                                             n_segments, highpassrad,
                                                             tolerance, high_buffer, max_iterations,
-                                                            add_info)), coordlist),
+                                                            add_info, 1)), coordlist),
                                     total=len(coordlist)))
     else:
         (snrs_list,
@@ -703,8 +698,8 @@ def contrast_curve(frames, para_angles, reffits, array_shape, curve_prior,
                                   np.zeros((len(injection_radii)*len(injection_angles))))
 
         contrast_gen = ForwardModel((frames, para_angles, reffits, array_shape, curve_prior,
-                                     aperture_size, ncomp, delta_rot, n_segments, highpassrad,
-                                     tolerance, high_buffer, max_iterations, add_info))
+                                     aperture_radius, ncomp, delta_rot, n_segments, highpassrad,
+                                     tolerance, high_buffer, max_iterations, add_info, nproc))
     
         for i in tqdm(range(len(coordlist))):
             

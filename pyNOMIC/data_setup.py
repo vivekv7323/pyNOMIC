@@ -124,7 +124,10 @@ class FileInfo(object):
             airmass = float(hdul[0].header['LBT_AIRM'])
             wind_spd = float(hdul[0].header['WINDSPD'])
             wind_dir = float(hdul[0].header['WINDDIR'])
-            seeing = float(hdul[0].header['SEEING'])
+            try:
+                seeing = float(hdul[0].header['SEEING'])
+            except:
+                seeing = np.nan
             # SMT Precip water vapor
             pwv = float(hdul[0].header['SMTTAU'])
             exp_time = float(hdul[0].header['EXPTIME'])
@@ -334,6 +337,51 @@ class ChopMetrics(object):
 
         return minmax, stdev, bgmean, locdiff, maximum, chop_guess, i
 
+class FourierMean(object):
+    
+    '''
+    Calculate the mean power of the chop residual component
+    of the Fourier spectrum of the image.
+    '''
+
+    def __init__(self, params):
+
+        self.params = params
+
+    def __call__(self, i):
+
+        """
+        Parameters:
+        ----------------------
+        index: integer
+            File index to process from 'files'
+
+        Returns: 
+        ---------------------- 
+        measure: float
+            Mean power of the chop residual component
+            of the Fourier spectrum of the image
+        index: integer
+        """
+
+        files, sigma = self.params
+
+        hdul = fits.open(files[i])
+        img = hdul[0].data[0]
+        hdul.close()
+    
+        # Compute 2D Fast Fourier Transform
+        f_transform = np.fft.fft2(img)
+        
+        # Shift zero frequency component to the center
+        f_shift = np.fft.fftshift(f_transform)
+        
+        # Calculate magnitude spectrum
+        img2 = np.log(np.abs(f_shift))
+
+        measure = np.mean(img2[(img2 < (np.median(img2) + sigma*np.std(img2)))])
+
+        return measure, i
 
 #----------------------------------------
 # FUNCTIONS
@@ -768,6 +816,57 @@ def frame_med_chop_identification(orig_frame_medians, files=None, size=13):
 
     return chops, frame_medians, chopm
 
+def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
+                                size=3, threadcount=50):
+    
+    """
+    Measures the chop states of each file by using the Fourier transform
+    of the image.
+
+    Parameters:
+    ----------------------
+    files: 1D numpy array
+        List of raw file paths, sorted.
+    sigma (optional): float
+        Standard deviation based threshold to discard the
+        low frequency end of the Fourier transform of the image.
+    threshold (optional): float
+        Threshold for dividing the maximum filtered measurement between
+        chop states.
+    size (optional): integer
+        Parameter for scipy.ndimage.maximum_filter1d, length along
+        which to calculate the 1-D maximum.
+    threadcount (optional): integer
+        Number of threads to employ in multithreading.
+        Default value is 50 threads.
+    Returns:
+    ----------------------
+    chops: 1D numpy array
+        List of chop states corresponding to the fmame medians, entries
+        are either "CHOP_A" or "CHOP_B"
+    measures: 1D numpy array
+        List of fourier means corresponding to the file list.
+    chopm: 1D numpy array
+        List of normalized frame medians corresponding to the file list.
+    """
+
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+        measures, indices =\
+            zip(*tqdm(pool.imap(FourierMean((files, sigma)),
+                                range(len(files))),
+                      desc="Calculating fourier means", total=(len(files))))
+
+    
+    chops = np.array(["CHOP_A"]*len(measures))
+
+    chopm = measures/maximum_filter1d(measures, size)
+    chopm = chopm/(np.nanmedian(chopm) + threshold*np.std(chopm))
+
+    chops[chopm > 1] = "CHOP_B"
+
+    return chops, measures, chopm
+    
 def chop_correction(orig_files, orig_chops, orig_header_info,
                     orig_maxima=None, coadd_limit = 10):
     
