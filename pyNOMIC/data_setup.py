@@ -48,6 +48,9 @@ class FileInfo(object):
         cold_stop_crop: integer
             Number of pixels to mask along the cold stop in
             the case of double-sided imaging.
+        correct_linearity: function
+            Linearity correction function.
+            Is None if linearity correction is disabled.
         """
         
         self.params = params
@@ -80,10 +83,19 @@ class FileInfo(object):
         """
         
         (new_raw_dirs, obj, skip_target_check, recalc_para_angles,
-         frame_median_limit, cold_stop_crop) = self.params
+         frame_median_limit, cold_stop_crop, correct_linearity) = self.params
 
         hdul = fits.open(file)
         orig = hdul[0].data[0]
+
+        if correct_linearity is not None:
+            orig = correct_linearity(orig)
+            if len(new_raw_dirs) != 2:
+
+                newhdul = fits.HDUList([fits.PrimaryHDU(data=orig)])
+                newhdul.writeto(os.path.join(new_raw_dirs[0], file.name),
+                                overwrite=True)
+                newhdul.close()               
 
         # Check if correct object
         if not skip_target_check:
@@ -470,8 +482,8 @@ def create_badmap(files, sigma=1, smooth=30, edge_cut=3, growth=1,
     return flat, badmap, filtered_frame
 
 def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = None,
-               skip_target_check=False, recalc_para_angles=False,
-               frame_median_limit = 28000, cold_stop_crop=0, threadcount=50):
+               skip_target_check=False, recalc_para_angles=False, correct_linearity=True,
+               frame_median_limit = 28000, cold_stop_crop=0, ncoadds=2, threadcount=50):
     """
     Sets up data by reading parameters from the fits headers and
     creating high pass frames for chop identification. For double sided
@@ -494,12 +506,16 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
         for the target name 'obj'
     recalc_para_angles: boolean
         If True, recalculates parallactic angle
+    correct_linearity: boolean
+        If True, corrects for detector nonlinearity
     frame_median_limit (optional): integer
         Limit for the median of the frame. Frames with median above this
         limit are rejected. Default is 28000 counts.
     cold_stop_crop (optional): integer
         Number of pixels to mask along the cold stop in
         the case of double-sided imaging.
+    ncoadds (optional): integer
+        Number of coadded frames in each image.
     threadcount (optional): integer
         Number of threads to employ in multithreading.
         Default value is 50 threads.
@@ -553,6 +569,13 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
 
         new_raw_dirs = []
 
+    if correct_linearity:
+        corrector = LinearityCorrection("NOMIC_linearity.npz", ncoadds=ncoadds)
+        if len(new_raw_dirs) != 2:
+            new_raw_dirs = [os.path.join(root_dir,'lincorr_raw')]
+    else:
+        corrector = None
+
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
         
@@ -562,7 +585,7 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
          pwvs, exp_times, ncoadds) = (
              
          zip(*tqdm(pool.imap(FileInfo((new_raw_dirs, obj, skip_target_check, recalc_para_angles,
-                                       frame_median_limit, cold_stop_crop)),
+                                       frame_median_limit, cold_stop_crop, corrector)),
                              files), total=len(files), desc="Reading file headers"))
         )
 

@@ -12,12 +12,14 @@ import astropy.constants as c
 import astropy.units as u
 from astropy.convolution import convolve_fft, Gaussian1DKernel
 
+from scipy.stats import linregress
 from scipy.special import j1
 from scipy.signal import find_peaks
 from scipy.optimize import curve_fit
 from scipy.interpolate import (interp1d, CubicSpline,
                                RegularGridInterpolator,
-                               NearestNDInterpolator)
+                               NearestNDInterpolator,
+                               PchipInterpolator)
 #----------------------------------------
 # CLASSES
 #----------------------------------------
@@ -203,7 +205,58 @@ class MaskFrames(object):
 
         return True, True
 
-            
+class LinearityCorrection(object):
+    
+    '''
+    Open raw images and obtain information from fits header.
+    '''
+
+    def __init__(self, ncoadds=2, lower_thresh=0.12, upper_thresh=0.34):
+
+        """
+        Parameters (contained inside a tuple):
+        ----------------------
+        """
+
+        data = np.load("filterdata/NOMIC_linearity.npz")
+        exp_times = data["arr_0"]
+        linearity_nodark_curves = data["arr_1"]
+        interpolators = []
+        
+        bools = (exp_times > lower_thresh) & (exp_times < upper_thresh)
+        
+        for i in range(len(linearity_nodark_curves)):
+            saturated = np.where(linearity_nodark_curves[i] == 16383)[0][1:]
+            lincurve = ncoadds*np.delete(linearity_nodark_curves[i], saturated)
+            result = linregress(exp_times[bools], ncoadds*linearity_nodark_curves[i][bools])
+            interpolators.append(PchipInterpolator(lincurve,
+                                   (np.delete(exp_times, saturated)*result[0] +
+                                    result[1])/lincurve))
+        self.interpolators = interpolators
+        
+    def __call__(self, image):
+
+        channels = [image[384:,:256], image[256:384,:256],
+                    image[128:256,:256], image[:128,:256],
+                    image[384:,256:], image[256:384,256:],
+                    image[128:256,256:], image[:128,256:]]
+
+        for i in range(len(channels)):
+            channels[i] = (channels[i].ravel()*
+                           self.interpolators[i](channels[i].ravel()))\
+                           .reshape(np.shape(channels[i]))
+
+        image[384:,:256] = channels[0]
+        image[256:384,:256] = channels[1]
+        image[128:256,:256] = channels[2]
+        image[:128,:256] = channels[3]
+        image[384:,256:] = channels[4]
+        image[256:384,256:] = channels[5]
+        image[128:256,256:] = channels[6]
+        image[:128,256:] = channels[7]
+
+        return image
+    
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
