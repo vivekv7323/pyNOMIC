@@ -103,8 +103,10 @@ class PSFSubtraction(object):
 
         # Open image and get array shape
         unsubtracted = fits.open(files[i])
-        img = unsubtracted[0].data[0]
-        array_shape = np.shape(unsubtracted[0].data[0])
+        img = unsubtracted[0].data
+        if img.ndim > 2:
+            img = img[0]
+        array_shape = np.shape(img)
 
         subtracted_frame = hf.chop_subtraction(img, i, chops[i], files, flats, nbg)    
 
@@ -309,8 +311,10 @@ class PSFSubRedux(object):
 
         # Open image and get array shape
         unsubtracted = fits.open(files[i])
-        img = unsubtracted[0].data[0]
-        array_shape = np.shape(unsubtracted[0].data[0])
+        img = unsubtracted[0].data
+        if img.ndim > 2:
+            img = img[0]
+        array_shape = np.shape(img)
 
         # Create model grid
         nx = np.linspace(0, array_shape[1]-1, array_shape[1])
@@ -641,8 +645,11 @@ class SubtractBackground(object):
         # Open image and get array shape
         unsubtracted = fits.open(raw_files[i])
         psf_subtracted = fits.open(psf_subtracted_files[i])
+        unsubtracted_img = unsubtracted[0].data
+        if unsubtracted_img.ndim > 2:
+            unsubtracted_img = unsubtracted_img[0]
 
-        subtracted_frame = hf.chop_subtraction(unsubtracted[0].data[0], i, chops[i],
+        subtracted_frame = hf.chop_subtraction(unsubtracted_img, i, chops[i],
                                                psf_subtracted_files, flats, nbg,
                                                resflats=resflats, flat_offsets=flat_offsets,
                                                correction_method=correction_method)

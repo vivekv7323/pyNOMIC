@@ -778,4 +778,5 @@ def snr_map(image, aperture_radius=14, threadcount=50):
                                         origin, aperture_radius)),
                                tup_arr)))
 
-    return np.asarray(snrs), np.asarray(noise_factors)
+    return (np.asarray(snrs).reshape(np.shape(image)), 
+            np.asarray(noise_factors).reshape(np.shape(image)))

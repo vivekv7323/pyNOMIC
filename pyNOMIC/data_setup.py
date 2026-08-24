@@ -124,7 +124,7 @@ class FileInfo(object):
 
         # Get frame median
         frame_median = np.median(orig)
-        channel_medians, channel_stds = hf.channel_stats(image)
+        channel_medians, channel_stds = hf.channel_stats(orig)
 
         # Only process if frame median is low enough
         if frame_median < frame_median_limit:
@@ -627,8 +627,8 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
                              np.asarray(wind_spds), np.asarray(wind_dirs), np.asarray(seeing),
                              np.asarray(pwvs), np.asarray(exp_times), np.asarray(ncoadds)))
 
-    header_info = np.concatenate((header_info, np.asarray(channel_medians),
-                                  np.asarray(channel_stds)))
+    header_info = np.concatenate((header_info, np.asarray(channel_medians).T,
+                                  np.asarray(channel_stds).T))
     
     if double_side:
         sx_raw_files = sorted(list(pathlib.Path(str(sx_raw_dir)).rglob('*.fits')))
