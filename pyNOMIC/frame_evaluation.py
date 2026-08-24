@@ -176,12 +176,16 @@ class EvaluateFrames(object):
         else:
             image = None
 
+        _, channel_stds = channel_stats(frame)
+
         # Create mask to mask out star
         max_mask =  hf.circular_mask(((array_shape[1]/2 - 0.5), (array_shape[0]/2 - 0.5)), 
                                      windowsize, array_shape[0], array_shape[1])
         
         # Compute background deviation by excluding values 3 sigma above the image median
         background_dev = np.nanstd(frame[~max_mask])
+
+        _, masked_channel_stds = channel_stats(frame[~max_mask])
 
         # Remove all nans for cross correlation, replace with 0s
         frame[np.isnan(frame)] = 0
@@ -261,9 +265,11 @@ class EvaluateFrames(object):
 
             image = None
             
-            return (psfmaxima, background_dev, corr, np.nan, lbtfit, reffit, image)
+            return (psfmaxima, background_dev, corr, np.nan, lbtfit,
+                    reffit, channel_stds, masked_channel_stds, image)
             
-        return (psfmaxima, background_dev, corr, np.nanstd(residual), lbtfit, reffit, image)
+        return (psfmaxima, background_dev, corr, np.nanstd(residual), lbtfit,
+                reffit, channel_stds, masked_channel_stds, image)
 
 #----------------------------------------
 # FUNCTIONS
@@ -405,7 +411,7 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
         #if __name__ == "__main__":
         with Pool(threadcount) as pool:
             (psfmaxima, background_dev, correlations,
-             residual_dev, lbtfits, reffits, images) =\
+             residual_dev, lbtfits, reffits, channel_stds, masked_channel_stds, images) =\
              zip(*tqdm(pool.imap(EvaluateFrames((None, chopa_integrated, chopb_integrated, wx, wy,
                                                 windowsize, array_shape, wvl_interp, relative_flux,
                                                  model_trefoil, subtract_psf, psf_subtracted_dir)),
@@ -424,7 +430,8 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
     eccentricities[np.isnan(eccentricities)] = eccentricities_r[np.isnan(eccentricities)]
     
     return (fwhms, eccentricities, np.asarray(psfmaxima), np.asarray(background_dev),
-            np.asarray(correlations), np.asarray(residual_dev), lbtfits, reffits, images)
+            np.asarray(correlations), np.asarray(residual_dev), lbtfits,
+            reffits, np.asarray(channel_stds), np.asarray(masked_channel_stds), images)
 
 def frame_rejection(chops, params, sigma=None):
 

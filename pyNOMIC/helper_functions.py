@@ -256,7 +256,27 @@ class LinearityCorrection(object):
         image[:128,256:] = channels[7]
 
         return image
+
+class RawPSFMaxima(object):
     
+    def __init__(self, params):
+
+        self.params = params
+    
+    def __call__(self, i):
+
+        (files, original_psf_locs,
+         edge_cut, windowsize) = self.params
+
+        hdul = fits.open(files[i])
+        img = hdul[0].data[0][round(original_psf_locs[num][0])+edge_cut-windowsize:\
+                              round(original_psf_locs[num][0])+edge_cut+windowsize,
+                              round(original_psf_locs[num][1])+edge_cut-windowsize:\
+                              round(original_psf_locs[num][1])+edge_cut+windowsize]
+        hdul.close()
+
+        return np.nanmax(img)
+
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
@@ -369,6 +389,29 @@ def integrate_frames_buffer(files, method="median", tolerance=0.9, threadcount=5
                                range(chunks)), desc="integrating files", total=chunks))
 
     return np.concatenate(frame_fragments)
+
+def channel_stats(image):
+
+    channels = np.array([image[384:,:256].ravel(), image[256:384,:256].ravel(),
+                         image[128:256,:256].ravel(), image[:128,:256].ravel(),
+                         image[384:,256:].ravel(), image[256:384,256:].ravel(),
+                         image[128:256,256:].ravel(), image[:128,256:].ravel()])
+
+    return np.nanmedian(channels, axis=1), np.nanstd(channels, axis=1)
+
+def get_raw_psf_maxima(files, original_psf_locs, edge_cut=2, windowsize=3):
+
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+        raw_psf_maxima = (zip(*tqdm(pool.imap(RawPSFMaxima((files,
+                                                            original_psf_locs,
+                                                            edge_cut,
+                                                            windowsize)),
+                                       range(len(files))),
+                             total=len(files), desc="Measuring PSF maxima"))
+        )
+
+    return np.asarray(raw_psf_maxima)
 
 def spatial_binning(img_cube, spatial_bin):
 

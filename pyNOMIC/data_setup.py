@@ -109,6 +109,7 @@ class FileInfo(object):
 
         # Get frame median
         frame_median = np.median(orig)
+        channel_medians, channel_stds = hf.channel_stats(image)
 
         # Only process if frame median is low enough
         if frame_median < frame_median_limit:
@@ -165,12 +166,14 @@ class FileInfo(object):
                 newhdul.close()
 
             return (chop, frame_median, para_angle, end_time, temp, airmass,
-                    wind_spd, wind_dir, seeing, pwv, exp_time, ncoadds)
+                    wind_spd, wind_dir, seeing, pwv, exp_time, ncoadds,
+                    channel_medians, channel_stds)
             
         else:
 
             return ("CHOP_NA", np.nan, np.nan, np.nan, np.nan, np.nan,
-                    np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
+                    np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
+                    np.nan, np.nan)
             
 class HighPass(object):
 
@@ -570,9 +573,16 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
         new_raw_dirs = []
 
     if correct_linearity:
-        corrector = LinearityCorrection("NOMIC_linearity.npz", ncoadds=ncoadds)
+        
+        corrector = hf.LinearityCorrection(ncoadds=ncoadds)
+        
+        lincorr_raw_dir = os.path.join(root_dir,'lincorr_raw')
+
+        if not os.path.exists(lincorr_raw_dir):
+            os.makedirs(lincorr_raw_dir)
+            
         if len(new_raw_dirs) != 2:
-            new_raw_dirs = [os.path.join(root_dir,'lincorr_raw')]
+            new_raw_dirs = [lincorr_raw_dir]
     else:
         corrector = None
 
@@ -582,7 +592,8 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
         (chops, frame_medians, para_angles,
          end_times, temps, airmasses,
          wind_spds, wind_dirs, seeing,
-         pwvs, exp_times, ncoadds) = (
+         pwvs, exp_times, ncoadds,
+         channel_medians, channel_stds) = (
              
          zip(*tqdm(pool.imap(FileInfo((new_raw_dirs, obj, skip_target_check, recalc_para_angles,
                                        frame_median_limit, cold_stop_crop, corrector)),
@@ -595,7 +606,10 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
                              np.asarray(end_times), np.asarray(temps), np.asarray(airmasses),
                              np.asarray(wind_spds), np.asarray(wind_dirs), np.asarray(seeing),
                              np.asarray(pwvs), np.asarray(exp_times), np.asarray(ncoadds)))
-        
+
+    header_info = np.concatenate((header_info, np.asarray(channel_medians),
+                                  np.asarray(channel_stds)))
+    
     if double_side:
         sx_raw_files = sorted(list(pathlib.Path(str(sx_raw_dir)).rglob('*.fits')))
         dx_raw_files = sorted(list(pathlib.Path(str(dx_raw_dir)).rglob('*.fits')))

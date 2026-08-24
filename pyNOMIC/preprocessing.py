@@ -1197,7 +1197,7 @@ def subtract_psfs(files, chops, stellar_temp,
                                        if a.name[0]!='.'\
                                        and str(a.parent)==psf_subtracted_dir])
 
-    return psf_subtracted_files, maxima, failcodes
+    return psf_subtracted_files, maxima, failcodes, reffits, lbtfits, trifits
 
 def parallelized_chop_subtraction(files, chops, prefix='', threadcount=50):
 
