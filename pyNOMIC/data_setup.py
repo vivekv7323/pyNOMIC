@@ -70,16 +70,31 @@ class FileInfo(object):
         frame_median: integer
             The median value of the frame
         para_angle: float
-            The parallactic angle identified from the image header
-        end_time:
-        temp:
-        airmass:
-        wind_spd:
-        wind_dir:
-        seeing:
-        pwv:
-        exp_time:
-        ncoadds:
+            The parallactic angle identified from
+            the image header in degrees.
+        end_time: float
+            End time of exposure (Julian date).
+        temp: float
+            Air temperature in degrees Celsius.
+        airmass: float
+            Airmass
+        wind_spd: float
+            Wind speed in meters per second.
+        wind_dir: float
+            Wind direction, degrees East of North.
+        seeing: float
+            DIMM seeing in arcseconds.
+        pwv: float
+            SMT Precip water vapor, 0.05*mm
+        exp_time: float
+            Nominal total integration time per pixel.
+        ncoadds: integer
+            Number of coadded frames in image.
+        channel_medians: 2D numpy array (8 X N)
+            Medians of each of the 8 channels in each image.     
+        channel_stds: 2D numpy array (8 X N)
+            Standard deviations of each of the
+            8 channels in each image.
         """
         
         (new_raw_dirs, obj, skip_target_check, recalc_para_angles,
@@ -599,6 +614,11 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
                                        frame_median_limit, cold_stop_crop, corrector)),
                              files), total=len(files), desc="Reading file headers"))
         )
+        
+    if correct_linearity & (len(new_raw_dirs) != 2):
+        files = sorted(list(pathlib.Path(str(new_raw_dirs[0])).rglob('*.fits')))
+        files = np.asarray([a for a in files if a.name[0]!='.'\
+                                       and str(a.parent)==new_raw_dirs[0]])
 
     chops = np.asarray(chops)
     
@@ -658,6 +678,7 @@ def highpass(files, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None,
     highpass_dir: path
         Directory in which high pass filtered frames are saved.
     """
+    
     # Create badmap if unavailable
     if (badmap_dir is None) or (use_temp_flat and tempflat_dir is None):
         tempflat, filtered_frame, badmap = create_new_flat(files)

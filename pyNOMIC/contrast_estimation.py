@@ -362,6 +362,52 @@ class ForwardModel(object):
 
         return last_contrast, curr_snr
 
+class FluxSNR(object):
+
+    def __init__(self, params):
+
+        self.params = params
+    
+    def __call__(self, coords):
+
+        image, array_shape, origin, aperture_radius = self.params
+
+        x, y = coords
+        x -= origin[0]
+        y -= origin[1]
+        source_radius = np.sqrt(x**2 + y**2)
+        source_angle  = np.arctan2(y, x)
+
+        if source_radius > aperture_radius:
+            
+            # Compute angles at which to create apertures
+            circle_pos = np.linspace(0, 2*np.pi,
+                                     int(np.floor(np.pi*source_radius/aperture_radius))+1)[:-1]
+
+            fluxes = np.zeros(len(circle_pos))
+
+            # Measure flux in each aperture by creating a mask
+            for i in range(len(circle_pos)):
+            
+                mask = hf.circular_mask((origin[0] + source_radius*np.cos(circle_pos[i] +
+                                                                          source_angle),
+                                      origin[1] + source_radius*np.sin(circle_pos[i] +
+                                                                          source_angle)),
+                                     aperture_radius, array_shape[0], array_shape[1])
+
+                fluxes[i] = np.nansum(image[mask])
+            
+            # Compute SNR
+            noise_factor = (np.std(fluxes[1:])*np.sqrt(1 + 1/(len(fluxes) - 1)))
+        
+            snr = (fluxes[0] - np.mean(fluxes[1:]))/noise_factor
+        
+            return snr, noise_factor
+            
+        else:
+            
+            return np.nan, np.nan
+
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
@@ -710,3 +756,26 @@ def contrast_curve(frames, para_angles, reffits, array_shape, curve_prior,
     snrs = np.asarray(snrs_list).reshape(len(injection_radii), len(injection_angles))
 
     return approx_contrasts, snrs
+
+def snr_map(image, aperture_radius=14, threadcount=50):
+
+    array_shape = np.shape(image)
+    snrmap = np.zeros(array_shape)
+
+    wx = np.linspace(0, array_shape[0]-1, array_shape[0])
+    wy = np.linspace(0, array_shape[1]-1, array_shape[1])
+    wx, wy = np.meshgrid(wx, wy)
+    
+    tup_arr = np.array([wx, wy])
+    tup_arr = tup_arr.reshape(2, np.shape(tup_arr)[1]*np.shape(tup_arr)[2]).T
+
+    origin = [array_shape[1]/2 - 0.5, array_shape[0]/2 - 0.5]
+
+    #if __name__ == "__main__":
+    with Pool(threadcount) as pool:
+            snrs, noise_factors, = \
+                zip(*tqdm(pool.imap(FluxSNR((image, array_shape,
+                                        origin, aperture_radius)),
+                               tup_arr)))
+
+    return np.asarray(snrs), np.asarray(noise_factors)

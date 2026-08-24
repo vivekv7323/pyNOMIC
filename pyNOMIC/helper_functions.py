@@ -208,44 +208,67 @@ class MaskFrames(object):
 class LinearityCorrection(object):
     
     '''
-    Open raw images and obtain information from fits header.
+    Apply linearity correction to raw NOMIC images.
     '''
 
     def __init__(self, ncoadds=2, lower_thresh=0.12, upper_thresh=0.34):
 
         """
-        Parameters (contained inside a tuple):
+        Parameters:
         ----------------------
+        ncoadds (optional): integer
+            Number of coadded frames in each image.
+            
+        lower_thresh (optional): float
+            Minimum exposure time for the linear region
+            of the detector linearity curve.
+            
+        upper_thresh (optional): float
+            Maximum exposure time for the linear region
+            of the detector linearity curve.
         """
 
+        # Load linearity data
         data = np.load("filterdata/NOMIC_linearity.npz")
         exp_times = data["arr_0"]
         linearity_nodark_curves = data["arr_1"]
         interpolators = []
-        
+
+        # Use linear region of the curve
         bools = (exp_times > lower_thresh) & (exp_times < upper_thresh)
         
         for i in range(len(linearity_nodark_curves)):
+            
+            # Remove saturated region
             saturated = np.where(linearity_nodark_curves[i] == 16383)[0][1:]
             lincurve = ncoadds*np.delete(linearity_nodark_curves[i], saturated)
+
+            # Fit linear region
             result = linregress(exp_times[bools], ncoadds*linearity_nodark_curves[i][bools])
+
+            # Create interpolator
             interpolators.append(PchipInterpolator(lincurve,
                                    (np.delete(exp_times, saturated)*result[0] +
                                     result[1])/lincurve))
+            
         self.interpolators = interpolators
         
     def __call__(self, image):
 
+        # Split image into regions
         channels = [image[384:,:256], image[256:384,:256],
                     image[128:256,:256], image[:128,:256],
                     image[384:,256:], image[256:384,256:],
                     image[128:256,256:], image[:128,256:]]
 
         for i in range(len(channels)):
+            
+            # Apply linearity correction onto channels
             channels[i] = (channels[i].ravel()*
                            self.interpolators[i](channels[i].ravel()))\
                            .reshape(np.shape(channels[i]))
 
+        # Replace image with corrected channels
         image[384:,:256] = channels[0]
         image[256:384,:256] = channels[1]
         image[128:256,:256] = channels[2]
@@ -258,12 +281,48 @@ class LinearityCorrection(object):
         return image
 
 class RawPSFMaxima(object):
+
+    '''
+    Get PSF maxima from raw images using PSF locations.
+    '''
     
     def __init__(self, params):
+
+        """
+        Parameters (contained inside tuple):
+        ----------------------
+        files: list or array 
+            List of raw file paths, sorted 
+            
+        original_psf_locs: 2 x len(files) numpy array
+            Array containing pixel coordinates of
+            psf locations in the input images  
+                
+        edge_cut: integer
+            Number of pixels that were removed
+            at the edges of the images used to
+            extract PSF locations.
+
+        windowsize: integer
+            Half width/height of the reference cutout image
+            (which is 1:1 aspect ratio)
+        """
 
         self.params = params
     
     def __call__(self, i):
+
+        """
+        Parameters:
+        ----------------------
+        index: integer
+            Index of image file in files.
+
+        Returns:
+        ----------------------
+        maximum: integer
+            Maximum of the PSF.
+        """
 
         (files, original_psf_locs,
          edge_cut, windowsize) = self.params
@@ -391,16 +450,63 @@ def integrate_frames_buffer(files, method="median", tolerance=0.9, threadcount=5
     return np.concatenate(frame_fragments)
 
 def channel_stats(image):
+    
+    """
+    Compute medians and standard deviations
+    for each channel in NOMIC images.
+    
+    Parameters:
+    ----------------------
+    image: 2D numpy array
+        A 512x512 image from NOMIC.
 
+    Returns:
+    ----------------------    
+    median: float
+        Medians of each of the 8 channels in the image.  
+    std: float
+        Standard deviations of each of the
+        8 channels in the image. 
+    """
+    
+    # Split image into channels, with raveled arrays
     channels = np.array([image[384:,:256].ravel(), image[256:384,:256].ravel(),
                          image[128:256,:256].ravel(), image[:128,:256].ravel(),
                          image[384:,256:].ravel(), image[256:384,256:].ravel(),
                          image[128:256,256:].ravel(), image[:128,256:].ravel()])
 
+    # Compute median and standard deviation
     return np.nanmedian(channels, axis=1), np.nanstd(channels, axis=1)
 
 def get_raw_psf_maxima(files, original_psf_locs, edge_cut=2, windowsize=3):
 
+    """
+    Get PSF maxima from raw images using PSF locations.
+
+    Parameters:
+    ----------------------
+    files: list or array 
+        List of raw file paths, sorted 
+        
+    original_psf_locs: 2 x len(files) numpy array
+        Array containing pixel coordinates of
+        psf locations in the input images  
+            
+    edge_cut: integer
+        Number of pixels that were removed
+        at the edges of the images used to
+        extract PSF locations.
+
+    windowsize: integer
+        Half width/height of the reference cutout image
+        (which is 1:1 aspect ratio)
+
+    Returns:
+    ----------------------
+    maxima: 1D numpy array
+        Raw PSF maxima.
+    """
+    
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
         raw_psf_maxima = (zip(*tqdm(pool.imap(RawPSFMaxima((files,
