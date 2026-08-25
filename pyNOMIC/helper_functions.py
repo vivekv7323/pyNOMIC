@@ -10,6 +10,8 @@ from astropy.io import fits
 from astropy.table import QTable
 import astropy.constants as c
 import astropy.units as u
+from astropy.coordinates import SkyCoord, Angle, EarthLocation
+from astropy.time import Time
 from astropy.convolution import convolve_fft, Gaussian1DKernel
 
 from scipy.stats import linregress
@@ -1427,6 +1429,52 @@ def calc_para_angles(lbt_lst, lbt_ra, lbt_dec):
                                  np.sin(declination)*
                                  np.cos(hour_angle)))/np.pi
     return para_angle
+
+def para_angle_query(dateobs, timeobs, objname):
+    
+    """
+    Calculates parallactic angles from "DATE-OBS",
+    "TIME-OBS", and "OBJNAME" header points.
+
+    Parameters:
+    ----------------------
+    dateobs: string
+        DATE-OBS from the LBT FITS header.
+    timeobs: string
+        TIME-OBS from the LBT FITS header.
+    objname: string
+        Object name from the LBT FITS header.
+
+    Returns:
+    ----------------------    
+    para_angle: float
+        Parallactic angle in degrees.
+    """
+    
+    latitude  = 32.70172857305824*np.pi/180
+    longitude = -109.88939259478585*np.pi/180
+    
+    # Define the observer's location (latitude, longitude)
+    location = EarthLocation(lat=latitude* u.rad, lon=longitude * u.rad)
+    
+    # Set your observation time and attach the location
+    obs_time = Time(hdul[0].header["DATE-OBS"]+"T"+hdul[0].header["TIME-OBS"],
+                    scale='utc', location=location)
+    
+    # Calculate local sidereal time ('mean' or 'apparent')
+    lst = obs_time.sidereal_time('apparent')
+    
+    # Query the object by name
+    c = SkyCoord.from_name(hdul[0].header["OBJNAME"])
+    declination = (Angle(c.dec))
+    hour_angle = Angle(lst - c.ra)
+    
+    para_angle = 180*np.arctan2(np.sin(hour_angle),
+                                (np.tan(latitude)*np.cos(declination) -
+                                 np.sin(declination)*
+                                 np.cos(hour_angle)))/np.pi
+    
+    return para_angle.value
 
 def image_groups(times, positions, smooth=100):
 

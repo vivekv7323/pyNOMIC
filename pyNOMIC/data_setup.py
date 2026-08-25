@@ -137,27 +137,47 @@ class FileInfo(object):
 
             # Obtain parallactic angle
             if recalc_para_angles:
-                para_angle = hf.calc_para_angles(hdul[0].header['LBT_LST'],
-                                                 hdul[0].header['LBT_RA'],
-                                                 hdul[0].header['LBT_DEC'])
+                try:
+                    para_angle = hf.calc_para_angles(hdul[0].header['LBT_LST'],
+                                                     hdul[0].header['LBT_RA'],
+                                                     hdul[0].header['LBT_DEC'])
+                except:
+                    para_angle = hf.para_angle_query(hdul[0].header["DATE-OBS"],
+                                                     hdul[0].header["TIME-OBS"],
+                                                     hdul[0].header["OBJNAME"])
             else:
                 para_angle = float(hdul[0].header['LBT_PARA'])   
 
-            # Obtain other fits header information (currently commented out)
+            # Obtain other fits header information
             time = Time(hdul[0].header['DATE-OBS'] +"T"+ hdul[0].header['TIME-END'],
                         format='isot', scale='utc')
             
             end_time = float(time.jd)
-            temp = float(hdul[0].header['LBTTEMP'])
-            airmass = float(hdul[0].header['LBT_AIRM'])
-            wind_spd = float(hdul[0].header['WINDSPD'])
-            wind_dir = float(hdul[0].header['WINDDIR'])
+            try:
+                temp = float(hdul[0].header['LBTTEMP'])
+            except:
+                temp = np.nan
+            try:
+                airmass = float(hdul[0].header['LBT_AIRM'])
+            except:
+                airmass = np.nan
+            try:
+                wind_spd = float(hdul[0].header['WINDSPD'])
+            except:
+                wind_spd = np.nan
+            try:
+                wind_dir = float(hdul[0].header['WINDDIR'])
+            except:
+                wind_dir = np.nan
             try:
                 seeing = float(hdul[0].header['SEEING'])
             except:
                 seeing = np.nan
-            # SMT Precip water vapor
-            pwv = float(hdul[0].header['SMTTAU'])
+            try:
+                # SMT Precip water vapor
+                pwv = float(hdul[0].header['SMTTAU'])
+            except:
+                pwv = np.nan
             exp_time = float(hdul[0].header['EXPTIME'])
             ncoadds = int(hdul[0].header['NCOADDS'])
             #nod_pos, dettemp, nomiccfw not found

@@ -176,7 +176,7 @@ class EvaluateFrames(object):
         else:
             image = None
 
-        _, channel_stds = channel_stats(frame)
+        _, channel_stds = hf.channel_stats(frame)
 
         # Create mask to mask out star
         max_mask =  hf.circular_mask(((array_shape[1]/2 - 0.5), (array_shape[0]/2 - 0.5)), 
@@ -185,7 +185,7 @@ class EvaluateFrames(object):
         # Compute background deviation by excluding values 3 sigma above the image median
         background_dev = np.nanstd(frame[~max_mask])
 
-        _, masked_channel_stds = channel_stats(frame[~max_mask])
+        _, masked_channel_stds = hf.channel_stats(frame[~max_mask])
 
         # Remove all nans for cross correlation, replace with 0s
         frame[np.isnan(frame)] = 0
