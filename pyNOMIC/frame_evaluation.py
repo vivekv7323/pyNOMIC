@@ -175,17 +175,13 @@ class EvaluateFrames(object):
             image = np.copy(frame)
         else:
             image = None
-
-        _, channel_stds = hf.channel_stats(frame)
-
+            
         # Create mask to mask out star
         max_mask =  hf.circular_mask(((array_shape[1]/2 - 0.5), (array_shape[0]/2 - 0.5)), 
                                      windowsize, array_shape[0], array_shape[1])
         
         # Compute background deviation by excluding values 3 sigma above the image median
         background_dev = np.nanstd(frame[~max_mask])
-
-        _, masked_channel_stds = hf.channel_stats(frame[~max_mask])
 
         # Remove all nans for cross correlation, replace with 0s
         frame[np.isnan(frame)] = 0
@@ -266,10 +262,10 @@ class EvaluateFrames(object):
             image = None
             
             return (psfmaxima, background_dev, corr, np.nan, lbtfit,
-                    reffit, channel_stds, masked_channel_stds, image)
+                    reffit, image)
             
         return (psfmaxima, background_dev, corr, np.nanstd(residual), lbtfit,
-                reffit, channel_stds, masked_channel_stds, image)
+                reffit, image)
 
 #----------------------------------------
 # FUNCTIONS
@@ -277,7 +273,7 @@ class EvaluateFrames(object):
 
 def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp, pxscale=0.0179,
                      windowsize=20, model_trefoil=True, subtract_psf=False,
-                     psf_subtracted_dir=None, method="median", buffer_type="frames",
+                     psf_subtracted_dir=None, method="median", buffer_type="frames", integrated_path=None,
                      tolerance=0.9, memoryMode=1, threadcount=50):
 
     """
@@ -360,18 +356,27 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
     # Files are in memory
     if memoryMode == 0:
 
-        # Create averaged frames for each chop state
-        if method == "mean":
-            chopa_integrated = np.nanmean(aligned_files[chops == "CHOP_A"], axis=0)
-            chopb_integrated = np.nanmean(aligned_files[chops == "CHOP_B"], axis=0)
-        else:
-            chopa_integrated = np.nanmedian(aligned_files[chops == "CHOP_A"], axis=0)
-            chopb_integrated = np.nanmedian(aligned_files[chops == "CHOP_B"], axis=0)
+        if integrated_path is None:
             
-        # Set nans to 0 allow correlation to proceed
-        chopb_integrated[np.isnan(chopb_integrated)] = 0
-        chopa_integrated[np.isnan(chopa_integrated)] = 0
+            # Create averaged frames for each chop state
+            if method == "mean":
+                chopa_integrated = np.nanmean(aligned_files[chops == "CHOP_A"], axis=0)
+                chopb_integrated = np.nanmean(aligned_files[chops == "CHOP_B"], axis=0)
+            else:
+                chopa_integrated = np.nanmedian(aligned_files[chops == "CHOP_A"], axis=0)
+                chopb_integrated = np.nanmedian(aligned_files[chops == "CHOP_B"], axis=0)
 
+            # Set nans to 0 to allow correlation to proceed
+            chopb_integrated[np.isnan(chopb_integrated)] = 0
+            chopa_integrated[np.isnan(chopa_integrated)] = 0
+            np.savez("Integrated_NOMIC_frames.npz", chopa_integrated, chopb_integrated)
+
+        else:
+            
+            stacks = np.load(integrated_path)
+            chopa_integrated = stacks["arr_0"]
+            chopb_integrated = stacks["arr_1"]
+            
         #if __name__ == "__main__":
         with Pool(threadcount) as pool:
             (psfmaxima, background_dev, correlations,
@@ -384,34 +389,48 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
                        total=len(aligned_files), desc="Evaluating frames"))
         
     else:
-    
-        if buffer_type == "frames":
-            chopa_integrated = hf.integrate_frames_buffer(aligned_files[chops=="CHOP_A"],
-                                                          method=method,
-                                                          tolerance=tolerance,
-                                                          threadcount=threadcount)
-            chopb_integrated = hf.integrate_frames_buffer(aligned_files[chops=="CHOP_B"],
-                                                          method=method,
-                                                          tolerance=tolerance,
-                                                          threadcount=threadcount)
-        else:        
-            if method == "mean":
-                chopa_integrated = hf.integrate_files_buffer(aligned_files[chops=="CHOP_A"],
-                                                             tolerance=tolerance,
-                                                             threadcount=threadcount)
-                chopb_integrated = hf.integrate_files_buffer(aligned_files[chops=="CHOP_B"],
-                                                             tolerance=tolerance,
-                                                             threadcount=threadcount)
+        
+        if integrated_path is None:
+            
+            if buffer_type == "frames":
+                
+                chopa_integrated = hf.integrate_frames_buffer(aligned_files[chops=="CHOP_A"],
+                                                              method=method,
+                                                              tolerance=tolerance,
+                                                              threadcount=threadcount)
+                
+                chopb_integrated = hf.integrate_frames_buffer(aligned_files[chops=="CHOP_B"],
+                                                              method=method,
+                                                              tolerance=tolerance,
+                                                              threadcount=threadcount)
             else:
-                raise ValueError("Incompatible integration method and buffer type")
+                
+                if method == "mean":
+                    
+                    chopa_integrated = hf.integrate_files_buffer(aligned_files[chops=="CHOP_A"],
+                                                                 tolerance=tolerance,
+                                                                 threadcount=threadcount)
+                    
+                    chopb_integrated = hf.integrate_files_buffer(aligned_files[chops=="CHOP_B"],
+                                                                 tolerance=tolerance,
+                                                                 threadcount=threadcount)
+                else:
+                    raise ValueError("Incompatible integration method and buffer type")
 
-        chopb_integrated[np.isnan(chopb_integrated)] = 0
-        chopa_integrated[np.isnan(chopa_integrated)] = 0
+            chopb_integrated[np.isnan(chopb_integrated)] = 0
+            chopa_integrated[np.isnan(chopa_integrated)] = 0
+            np.savez("Integrated_NOMIC_frames.npz", chopa_integrated, chopb_integrated)
+            
+        else:
+            
+            stacks = np.load(integrated_path)
+            chopa_integrated = stacks["arr_0"]
+            chopb_integrated = stacks["arr_1"]
 
         #if __name__ == "__main__":
         with Pool(threadcount) as pool:
             (psfmaxima, background_dev, correlations,
-             residual_dev, lbtfits, reffits, channel_stds, masked_channel_stds, images) =\
+             residual_dev, lbtfits, reffits, images) =\
              zip(*tqdm(pool.imap(EvaluateFrames((None, chopa_integrated, chopb_integrated, wx, wy,
                                                 windowsize, array_shape, wvl_interp, relative_flux,
                                                  model_trefoil, subtract_psf, psf_subtracted_dir)),
@@ -431,7 +450,7 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
     
     return (fwhms, eccentricities, np.asarray(psfmaxima), np.asarray(background_dev),
             np.asarray(correlations), np.asarray(residual_dev), lbtfits,
-            reffits, np.asarray(channel_stds), np.asarray(masked_channel_stds), images)
+            reffits, images)
 
 def frame_rejection(chops, params, sigma=None):
 

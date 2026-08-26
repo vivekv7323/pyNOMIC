@@ -470,6 +470,21 @@ def channel_stats(image):
         Standard deviations of each of the
         8 channels in the image. 
     """
+
+    array_shape = np.shape(image)
+
+    if np.shape(image) != (512, 512):
+
+        pad_width = int((512 - array_shape[0])/2)
+        pad_height = int((512 - array_shape[1])/2)
+        
+        image = np.pad(image, ((int((512 - array_shape[0])/2),
+                            int((512 - array_shape[0])/2)),
+                           (int((512 - array_shape[1])/2),
+                            int((512 - array_shape[1])/2))),
+                     constant_values=np.nan)
+        
+        print(np.shape(yee))
     
     # Split image into channels, with raveled arrays
     channels = np.array([image[384:,:256].ravel(), image[256:384,:256].ravel(),
@@ -1458,14 +1473,14 @@ def para_angle_query(dateobs, timeobs, objname):
     location = EarthLocation(lat=latitude* u.rad, lon=longitude * u.rad)
     
     # Set your observation time and attach the location
-    obs_time = Time(hdul[0].header["DATE-OBS"]+"T"+hdul[0].header["TIME-OBS"],
+    obs_time = Time(dateobs+"T"+timeobs,
                     scale='utc', location=location)
     
     # Calculate local sidereal time ('mean' or 'apparent')
     lst = obs_time.sidereal_time('apparent')
     
     # Query the object by name
-    c = SkyCoord.from_name(hdul[0].header["OBJNAME"])
+    c = SkyCoord.from_name(objname)
     declination = (Angle(c.dec))
     hour_angle = Angle(lst - c.ra)
     

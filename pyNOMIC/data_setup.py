@@ -200,11 +200,15 @@ class FileInfo(object):
                                 overwrite=True)
                 newhdul.close()
 
+            hdul.close()
+
             return (chop, frame_median, para_angle, end_time, temp, airmass,
                     wind_spd, wind_dir, seeing, pwv, exp_time, ncoadds,
                     channel_medians, channel_stds)
             
         else:
+
+            hdul.close()
 
             return ("CHOP_NA", np.nan, np.nan, np.nan, np.nan, np.nan,
                     np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
