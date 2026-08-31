@@ -484,8 +484,6 @@ def channel_stats(image):
                             int((512 - array_shape[1])/2))),
                      constant_values=np.nan)
         
-        print(np.shape(yee))
-    
     # Split image into channels, with raveled arrays
     channels = np.array([image[384:,:256].ravel(), image[256:384,:256].ravel(),
                          image[128:256,:256].ravel(), image[:128,:256].ravel(),

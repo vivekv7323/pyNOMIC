@@ -663,6 +663,8 @@ class SubtractBackground(object):
         subtracted_frame -= np.nanmedian(subtracted_frame)
         psf_subtracted_frame -= np.nanmedian(psf_subtracted_frame)
 
+        chopsub_stds = hf.channel_stats(psf_subtracted_frame)
+
         # These steps are done in a very particular order
         # Remove channel edges
         for channel_edge in channel_edges:
@@ -721,13 +723,17 @@ class SubtractBackground(object):
 
         # Remove image edges as they are often bad columns/rows
         subtracted_frame = subtracted_frame[edge_cut:-1*edge_cut ,edge_cut :-1*edge_cut]
-        psf_subtracted_frame = psf_subtracted_frame[edge_cut:-1*edge_cut ,edge_cut :-1*edge_cut]        
+        psf_subtracted_frame = psf_subtracted_frame[edge_cut:-1*edge_cut ,edge_cut :-1*edge_cut]
 
         # Subtract convolved background
-        subtracted_frame = subtracted_frame - convolve_fft(np.pad(psf_subtracted_frame,
-                                                                  50, mode='edge'),
+
+        convolve_bg = convolve_fft(np.pad(psf_subtracted_frame, 50, mode='edge'),
                                                            Ring2DKernel(5*smooth, 4*smooth))\
                                                                [50:-50, 50:-50]
+
+        subtracted_frame -= convolve_bg
+        
+        backsub_stds = hf.channel_stats(psf_subtracted_frame - convolve_bg)
 
         # Write image to file
         newhdul = fits.HDUList([fits.PrimaryHDU(data=(subtracted_frame))])
@@ -738,7 +744,7 @@ class SubtractBackground(object):
         unsubtracted.close()
         psf_subtracted.close()
 
-        return True, True
+        return chopsub_stds, backsub_stds
 
 class RegisterFrames(object):
 
@@ -1439,18 +1445,19 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
         
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        results = zip(*tqdm(pool.imap(SubtractBackground((subtracted_dir, raw_files,
-                                                          psf_subtracted_files, chops,
-                                                          channel_edges, biased_columns,
-                                                          striped_regions, vertical_biases,
-                                                          horizontal_biases, biased_rows, nanrows,
-                                                          nancols, flats, resflats,
-                                                          flat_offsets, correction_method,
-                                                          channel_method, nbg, smooth, edge_cut)),
-                                      range(len(raw_files))), total=len(raw_files),
-                           desc = "Subtracting backgrounds..."))
+        (chopsub_stds,
+         backsub_stds) = zip(*tqdm(pool.imap(SubtractBackground((subtracted_dir, raw_files,
+                                                                 psf_subtracted_files, chops,
+                                                                 channel_edges, biased_columns,
+                                                                 striped_regions, vertical_biases,
+                                                                 horizontal_biases, biased_rows, nanrows,
+                                                                 nancols, flats, resflats,
+                                                                 flat_offsets, correction_method,
+                                                                 channel_method, nbg, smooth, edge_cut)),
+                                             range(len(raw_files))), total=len(raw_files),
+                                   desc = "Subtracting backgrounds..."))
 
-    return subtracted_dir 
+    return np.asarray(chopsub_stds), np.asarray(backsub_stds)
 
 def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask=None,
                        alignment_method="fitting", interp_method="cubic", windowsize=20,
