@@ -410,7 +410,7 @@ class PSFSubRedux(object):
 
                 # Remove residual
                 final = (img - psf_model)*(1-psfrem) + (img - psf_model - residual_bg +
-                                                        np.median(residual_bg[cirmask]))*psfrem
+                                                        grad)*psfrem
             elif residual_handling == "replace":
 
                 final = img - psf_model
@@ -1130,7 +1130,7 @@ def create_star_mask(chopa_star_img, chopb_star_img, chopa_flat, chopb_flat,
 def subtract_psfs(files, chops, stellar_temp,
                   maxima=None, badmap=None, starmask=None, flats=None, windowsize=35,
                   nbg=1, smooth=5, recur_iteration=2, remove_trefoil=True,
-                  residual_handling="", fit_reject_criterion=100, prefix='', threadcount=50):
+                  residual_handling="remove", fit_reject_criterion=100, prefix='', threadcount=50):
 
     """
     Subtracts the stellar PSF from every image.
