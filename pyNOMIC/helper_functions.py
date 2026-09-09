@@ -12,7 +12,9 @@ import astropy.constants as c
 import astropy.units as u
 from astropy.coordinates import SkyCoord, Angle, EarthLocation
 from astropy.time import Time
-from astropy.convolution import convolve_fft, Gaussian1DKernel
+from astropy.convolution import (convolve_fft,
+                                 Gaussian1DKernel,
+                                 Ring2DKernel)
 
 from scipy.stats import linregress
 from scipy.special import j1
@@ -1294,22 +1296,25 @@ def empirical_psf_fit(cutout, wvl_interp, relative_flux, model_trefoil=True, use
     else:
         return reffit, lbtfit, np.full(7, np.nan)
 
-def simple_highpass(img, psf_loc, array_shape, highpassrad, fwhm):
+def simple_highpass(img, psf_loc, array_shape, highpassrad, fwhm, use_mask=True):
 
-    # Create mask to mask out star
-    max_mask =  hf.circular_mask((psf_loc[0], psf_loc[1]), 1.1*fwhm,
-                                 array_shape[0], array_shape[1])
-    max_aperture = hf.circular_mask((psf_loc[0], psf_loc[1]),
-                                    1.1*1.1*fwhm, array_shape[0],
-                                    array_shape[1]) ^ max_mask
-    
     new_bg = np.copy(img)
-    new_bg[max_mask] = np.median(new_bg[max_aperture])
+        
+    if use_mask:
+        # Create mask to mask out star
+        max_mask =  circular_mask((psf_loc[0], psf_loc[1]), 1.1*fwhm,
+                                     array_shape[0], array_shape[1])
+        max_aperture = circular_mask((psf_loc[0], psf_loc[1]),
+                                        1.1*1.1*fwhm, array_shape[0],
+                                        array_shape[1]) ^ max_mask
+        
+        new_bg[max_mask] = np.median(new_bg[max_aperture])
 
     # Perform high pass filtering
     img = img - convolve_fft(np.pad(new_bg, 50, mode='edge'),
                              Ring2DKernel(int(highpassrad*5/4),
                                           highpassrad))[50:-50, 50:-50]
+    return img
     
 def pad_frame(frame, px, py, padding):
     

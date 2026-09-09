@@ -418,10 +418,14 @@ class FourierMean(object):
         index: integer
         """
 
-        files, sigma = self.params
+        files, sigma, cutout = self.params
 
         hdul = fits.open(files[i])
-        img = hdul[0].data[0]
+        if len(cutout) != 4:
+            img = hdul[0].data[0]
+        else:
+            img = hdul[0].data[0][cutout[0]:cutout[1],
+                                  cutout[2]:cutout[3]]
         hdul.close()
     
         # Compute 2D Fast Fourier Transform
@@ -595,12 +599,12 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
     # If data is double sided, split raws into two directories
     if double_side:
         
-        sx_raw_dir=os.path.join(root_dir,'sx_raw')
+        sx_raw_dir=os.path.join(root_dir,'sx_'+os.path.basename(raw_dir))
     
         if not os.path.exists(sx_raw_dir):
             os.makedirs(sx_raw_dir)
 
-        dx_raw_dir=os.path.join(root_dir,'dx_raw')
+        dx_raw_dir=os.path.join(root_dir,'dx_'+os.path.basename(raw_dir))
     
         if not os.path.exists(dx_raw_dir):
             os.makedirs(dx_raw_dir)
@@ -615,7 +619,7 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
         
         corrector = hf.LinearityCorrection(ncoadds=ncoadds)
         
-        lincorr_raw_dir = os.path.join(root_dir,'lincorr_raw')
+        lincorr_raw_dir = os.path.join(root_dir,'lincorr_'+os.path.basename(raw_dir))
 
         if not os.path.exists(lincorr_raw_dir):
             os.makedirs(lincorr_raw_dir)
@@ -853,7 +857,8 @@ def stellar_chop_identification(files, highpass_dir, nbg=5, chop_direction = 'UP
 
     return chops, maxima
 
-def frame_med_chop_identification(orig_frame_medians, files=None, size=13):
+def frame_med_chop_identification(orig_frame_medians, files=None,
+                                  threshold=0, size=13):
     
     """
     Measures the chop states of each file by using the frame medians.
@@ -865,6 +870,9 @@ def frame_med_chop_identification(orig_frame_medians, files=None, size=13):
     files (optional): 1D numpy array
         List of raw file paths, sorted. If provided, the frame medians
         are recomputed.
+    threshold (optional): float
+        Threshold for dividing the maximum filtered measurement between
+        chop states.
     size (optional): integer
         Parameter for scipy.ndimage.maximum_filter1d, length along
         which to calculate the 1-D maximum.
@@ -892,14 +900,14 @@ def frame_med_chop_identification(orig_frame_medians, files=None, size=13):
     chops = np.array(["CHOP_A"]*len(frame_medians))
 
     chopm = frame_medians/maximum_filter1d(frame_medians, size)
-    chopm = chopm/np.nanmean(chopm)
+    chopm = chopm/np.nanmean(chopm) + threshold*np.std(chopm)
 
     chops[chopm > 1] = "CHOP_B"
 
     return chops, frame_medians, chopm
 
 def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
-                                size=3, threadcount=50):
+                                size=3, cutout=[], threadcount=50):
     
     """
     Measures the chop states of each file by using the Fourier transform
@@ -935,7 +943,7 @@ def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
         measures, indices =\
-            zip(*tqdm(pool.imap(FourierMean((files, sigma)),
+            zip(*tqdm(pool.imap(FourierMean((files, sigma, cutout)),
                                 range(len(files))),
                       desc="Calculating fourier means", total=(len(files))))
 

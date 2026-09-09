@@ -67,8 +67,10 @@ class PSFSubtraction(object):
         remove_trefoil: boolean
             Enables removal of psf residual from trefoil through
             highpass filtering.
-        remove_residual: boolean
-            Enables removal of psf residual through highpass filtering.
+        residual_handling: string
+            Enables removal of psf residual through highpass filtering "remove",
+            or replacement using adjacent chop frames "replace",
+            or nothing (None).
         """
         
         self.params = params
@@ -99,7 +101,7 @@ class PSFSubtraction(object):
         
         (psf_subtracted_dir, files, chops, maxima, badmap, starmasks,
          flats, wvl_interp, relative_flux, windowsize, nbg, smooth, 
-         recur_iteration, remove_trefoil, remove_residual) = self.params
+         recur_iteration, remove_trefoil, residual_handling) = self.params
 
         # Open image and get array shape
         unsubtracted = fits.open(files[i])
@@ -191,31 +193,44 @@ class PSFSubtraction(object):
         if remove_trefoil and np.isnan(trifit[0]):
             failcode += 1
         
-        if remove_residual:
-
-            # Smoothen out residual
-            residual = (subtracted_frame - psf_model)
-            residual_bg = convolve_fft(residual, Gaussian2DKernel(2))
-
+        if residual_handling is not None:
+            
             # Create residual removal mask
             radius = 1.2*int(np.sqrt(reffit[1]**2 + reffit[2]**2))
             psfrem = hf.psf_removal_mask(origin, radius, 1.2*radius, array_shape[0],
                                          array_shape[1])
 
-            # Create circular sampling mask
-            cirmask = (hf.circular_mask(origin, radius, array_shape[0], array_shape[1]) ^
-                       hf.circular_mask(origin, 1.2*radius, array_shape[0], array_shape[1]))
+            if residual_handling == "remove":
 
-            # Multiple flat back
-            if flats is not None:
-                if chops[i] == "CHOP_A":
-                    psf_model = psf_model*flats[0]/np.nanmedian(flats[0])
-                else:
-                    psf_model = psf_model*flats[1]/np.nanmedian(flats[1])
+                # Smoothen out residual
+                residual = (subtracted_frame - psf_model)
+                residual_bg = convolve_fft(residual, Gaussian2DKernel(2))
 
-            # Remove residual
-            final = (img - psf_model)*(1-psfrem) + (img - psf_model - residual_bg +
-                                                    np.median(residual_bg[cirmask]))*psfrem
+                # Obtain large scale gradient
+                grad = convolve_fft(residual, Gaussian2DKernel(radius))
+
+                # Multiple flat back
+                if flats is not None:
+                    if chops[i] == "CHOP_A":
+                        psf_model = psf_model*flats[0]/np.nanmedian(flats[0])
+                    else:
+                        psf_model = psf_model*flats[1]/np.nanmedian(flats[1])
+
+                # Remove residual
+                final = (img - psf_model)*(1-psfrem) + (img - psf_model - residual_bg +
+                                                        grad)*psfrem
+            elif residual_handling == "replace":
+
+                final = img - psf_model
+                
+                # Obtain large scale gradients
+                bg_bg = convolve_fft(img - subtracted_frame, Gaussian2DKernel(radius))
+                final_bg = convolve_fft(final, Gaussian2DKernel(radius))
+
+                final = final*(1-psfrem) + (bg - bg_bg + final+bg)*psfrem
+
+            else:
+                raise ValueError("Invalid residual handling method")
         else:
             if flats is not None:
                 if chops[i] == "CHOP_A":
@@ -282,8 +297,10 @@ class PSFSubRedux(object):
             Number of frames to use in rolling background subtraction
         smooth: integer
             Radius of smoothing kernel, divided by 5
-        remove_residual: boolean
-            Enables removal of psf residual through highpass filtering.
+        residual_handling: string
+            Enables removal of psf residual through highpass filtering "remove",
+            or replacement using adjacent chop frames "replace",
+            or nothing (None).
         """
         
         self.params = params
@@ -307,7 +324,7 @@ class PSFSubRedux(object):
         (psf_subtracted_dir, files, chops, maxima, failcodes,
          reffits, lbtfits, trifits, badmap, flats, wvl_interp,
          relative_flux, windowsize, fit_reject_criterion,
-         nbg, smooth, remove_residual) = self.params
+         nbg, smooth, residual_handling) = self.params
 
         # Open image and get array shape
         unsubtracted = fits.open(files[i])
@@ -355,8 +372,8 @@ class PSFSubRedux(object):
             psf_model += hf.center_triangle((nx, ny), trifit[0], trifit[1], trifit[2],
                                             trifit[3], trifit[4], origin[0], origin[1],
                                             trifit[5], trifit[6], ravel=False)
-
-        if remove_residual:
+            
+        if residual_handling is not None:
 
             subtracted_frame = hf.chop_subtraction(img, i, chops[i], files, flats, nbg)    
     
@@ -364,28 +381,41 @@ class PSFSubRedux(object):
                 # Create boolean map from badmap to remove bad pixels
                 subtracted_frame[badmap < 1] = np.nan
 
-            # Smoothen out residual
-            residual = (subtracted_frame - psf_model)
-            residual_bg = convolve_fft(residual, Gaussian2DKernel(2))
-
             # Create residual removal mask
             radius = 1.2*int(np.sqrt(reffit[1]**2 + reffit[2]**2))
             psfrem = hf.psf_removal_mask(origin, radius, 1.2*radius, array_shape[0],
                                          array_shape[1])
+                
+            if residual_handling == "remove":
+                
+                # Smoothen out residual
+                residual = (subtracted_frame - psf_model)
+                residual_bg = convolve_fft(residual, Gaussian2DKernel(2))
 
-            # Create circular sampling mask
-            cirmask = (hf.circular_mask(origin, radius, array_shape[0], array_shape[1]) ^
-                       hf.circular_mask(origin, 1.2*radius, array_shape[0], array_shape[1]))
+                # Obtain large scale gradient
+                grad = convolve_fft(residual, Gaussian2DKernel(radius))
 
-            if flats is not None:
-                if chops[i] == "CHOP_A":
-                    psf_model = psf_model*flats[0]/np.nanmedian(flats[0])
-                else:
-                    psf_model = psf_model*flats[1]/np.nanmedian(flats[1])
+                if flats is not None:
+                    if chops[i] == "CHOP_A":
+                        psf_model = psf_model*flats[0]/np.nanmedian(flats[0])
+                    else:
+                        psf_model = psf_model*flats[1]/np.nanmedian(flats[1])
 
-            # Remove residual
-            final = (img - psf_model)*(1-psfrem) + (img - psf_model - residual_bg +
-                                                    np.median(residual_bg[cirmask]))*psfrem
+                # Remove residual
+                final = (img - psf_model)*(1-psfrem) + (img - psf_model - residual_bg +
+                                                        np.median(residual_bg[cirmask]))*psfrem
+            elif residual_handling == "replace":
+
+                final = img - psf_model
+                
+                # Obtain large scale gradients
+                bg_bg = convolve_fft(img - subtracted_frame, Gaussian2DKernel(radius))
+                final_bg = convolve_fft(final, Gaussian2DKernel(radius))
+
+                final = final*(1-psfrem) + (bg - bg_bg + final+bg)*psfrem
+
+            else:
+                raise ValueError("Invalid residual handling method")
         else:
             
             if flats is not None:
@@ -511,7 +541,7 @@ class ChopAlign(object):
         """
         
         (files, chops, chopres_dir, highfreq_dir, reference, px, py,
-         ref_index, smooth, channel_edge, interp_method) = self.params
+         ref_index, smooth, channel_edges, interp_method) = self.params
 
         hdul = fits.open(files[i])
         img = hdul[0].data
@@ -1092,8 +1122,8 @@ def create_star_mask(chopa_star_img, chopb_star_img, chopa_flat, chopb_flat,
 
 def subtract_psfs(files, chops, stellar_temp,
                   maxima=None, badmap=None, starmask=None, flats=None, windowsize=35,
-                  nbg=1, smooth=5, recur_iteration=2, remove_trefoil=True, remove_residual=False,
-                  fit_reject_criterion=100, prefix='', threadcount=50):
+                  nbg=1, smooth=5, recur_iteration=2, remove_trefoil=True,
+                  residual_handling="", fit_reject_criterion=100, prefix='', threadcount=50):
 
     """
     Subtracts the stellar PSF from every image.
@@ -1130,9 +1160,10 @@ def subtract_psfs(files, chops, stellar_temp,
     remove_trefoil (optional): boolean
         Enables removal of psf residual from trefoil.
         Enabled by default.
-    remove_residual (optional): boolean
-        Enables removal of psf residual through highpass filtering.
-        Disabled by default.
+    residual_handling: string
+        Enables removal of psf residual through highpass filtering "remove",
+        or replacement using adjacent chop frames "replace",
+        or nothing (None).
     fit_reject_criterion (optional): integer
         Maximum allowed failcode, used in replacing failed psf fits.
     prefix (optional): string
@@ -1177,7 +1208,7 @@ def subtract_psfs(files, chops, stellar_temp,
                                                         chops, maxima, badmap, starmask,
                                                         flats, wvl_interp, relative_flux,
                                                         windowsize, nbg, smooth, recur_iteration,
-                                                        remove_trefoil, remove_residual)),
+                                                        remove_trefoil, residual_handling)),
                                         range(len(files))), total=len(files),
                               desc="Subtracting PSFs"))
 
@@ -1198,7 +1229,7 @@ def subtract_psfs(files, chops, stellar_temp,
                                                            reffits, lbtfits, trifits, badmap,
                                                            flats, wvl_interp, relative_flux,
                                                            windowsize, fit_reject_criterion,
-                                                           nbg, smooth, remove_residual)),
+                                                           nbg, smooth, residual_handling)),
                                               failed_indices), total=len(failed_indices),
                                     desc="Subtracting failed PSFs"))
             
