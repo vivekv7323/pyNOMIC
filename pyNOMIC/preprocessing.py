@@ -112,6 +112,10 @@ class PSFSubtraction(object):
 
         subtracted_frame = hf.chop_subtraction(img, i, chops[i], files, flats, nbg)    
 
+        if residual_handling == "replace":
+            
+            bg = img - subtracted_frame
+            
         if badmap is not None:
             # Create boolean map from badmap to remove bad pixels
             subtracted_frame[badmap < 1] = np.nan
@@ -222,12 +226,12 @@ class PSFSubtraction(object):
             elif residual_handling == "replace":
 
                 final = img - psf_model
-                
+
                 # Obtain large scale gradients
-                bg_bg = convolve_fft(img - subtracted_frame, Gaussian2DKernel(radius))
+                bg_bg = convolve_fft(bg, Gaussian2DKernel(radius))
                 final_bg = convolve_fft(final, Gaussian2DKernel(radius))
 
-                final = final*(1-psfrem) + (bg - bg_bg + final+bg)*psfrem
+                final = final*(1-psfrem) + (bg - bg_bg + final_bg)*psfrem
 
             else:
                 raise ValueError("Invalid residual handling method")
@@ -376,7 +380,10 @@ class PSFSubRedux(object):
         if residual_handling is not None:
 
             subtracted_frame = hf.chop_subtraction(img, i, chops[i], files, flats, nbg)    
-    
+
+            if residual_handling == "replace":
+                bg = img - subtracted_frame
+                
             if badmap is not None:
                 # Create boolean map from badmap to remove bad pixels
                 subtracted_frame[badmap < 1] = np.nan
@@ -407,12 +414,12 @@ class PSFSubRedux(object):
             elif residual_handling == "replace":
 
                 final = img - psf_model
-                
+
                 # Obtain large scale gradients
-                bg_bg = convolve_fft(img - subtracted_frame, Gaussian2DKernel(radius))
+                bg_bg = convolve_fft(bg, Gaussian2DKernel(radius))
                 final_bg = convolve_fft(final, Gaussian2DKernel(radius))
 
-                final = final*(1-psfrem) + (bg - bg_bg + final+bg)*psfrem
+                final = final*(1-psfrem) + (bg - bg_bg + final_bg)*psfrem
 
             else:
                 raise ValueError("Invalid residual handling method")
