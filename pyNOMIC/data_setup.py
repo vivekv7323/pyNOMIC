@@ -101,7 +101,10 @@ class FileInfo(object):
          frame_median_limit, cold_stop_crop, correct_linearity) = self.params
 
         hdul = fits.open(file)
-        orig = hdul[0].data[0]
+        orig = hdul[0].data
+
+        if orig.ndim == 3:
+            orig = orig[0]
 
         if correct_linearity is not None:
             orig = correct_linearity(orig)
@@ -212,7 +215,7 @@ class FileInfo(object):
 
             return ("CHOP_NA", np.nan, np.nan, np.nan, np.nan, np.nan,
                     np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
-                    np.nan, np.nan)
+                    channel_medians, channel_stds)
             
 class HighPass(object):
 

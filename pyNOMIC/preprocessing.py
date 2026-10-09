@@ -162,7 +162,7 @@ class PSFSubtraction(object):
             failcode = 0
 
             # Fit cutout to get empirical psf parameters
-            reffit, lbtfit, trifit = hf.empirical_psf_fit(cutout, wvl_interp, relative_flux,
+            reffit, lbtfit, trifit = hf.seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
                                                           model_trefoil=remove_trefoil)
             if not np.isnan(reffit[0]):
                 # Get origin of the PSF in the frame
@@ -548,7 +548,8 @@ class ChopAlign(object):
         """
         
         (files, chops, chopres_dir, highfreq_dir, reference, px, py,
-         ref_index, smooth, channel_edges, interp_method) = self.params
+         ref_index, smooth, edge_cut, channel_edges, interp_method,
+         registration_method, search_rad, iterations, offsets, save_file) = self.params
 
         hdul = fits.open(files[i])
         img = hdul[0].data
@@ -558,42 +559,92 @@ class ChopAlign(object):
         subtracted_frame = hf.chop_subtraction(img, i, chops[i], files, [0,0], 1,
                                                correction_method="subtraction")
 
-        # Remove channel edges with interpolation
+        # Remove channel edges with interpolation 
         for channel_edge in channel_edges:
             repaired_frame = hf.repair_channel_edges(subtracted_frame, channel_edge)
 
         # Convolve with a Gaussian kernel to remove high frequencies
-        convolved_frame = convolve_fft(np.pad(repaired_frame, 10*smooth, mode='edge'),
+        convolved_frame = convolve_fft(np.pad(repaired_frame[edge_cut:-1*edge_cut,
+                                                             edge_cut:-1*edge_cut],
+                                              10*smooth+edge_cut, mode='edge'),
                                        Gaussian2DKernel(smooth))[10*smooth:-10*smooth,
                                                                  10*smooth:-10*smooth]
 
         # Preserve high frequency information
         highfreq = img - convolved_frame
 
-        # Do FFT registration to find offsets
         if chops[ref_index] == chops[i]:
-            offset = chi2_shift(reference, convolved_frame, upsample_factor='auto',
-                                return_error=False)
+
+            chop_ref = reference
+
         else:
-            offset = chi2_shift(-1*reference, convolved_frame, upsample_factor='auto',
+
+            chop_ref = -1*reference
+
+        if registration_method == "FFT":
+
+            # Do FFT registration to find offsets
+            offset = chi2_shift(chop_ref, convolved_frame, upsample_factor='auto',
                                 return_error=False)
 
-        # Use offsets to align the image
-        aligned_img = hf.align_frame(convolved_frame, px, py, (0,0), offset, method=interp_method)
-        
-        # Write image to file
-        newhdul = fits.HDUList([fits.PrimaryHDU(data=(aligned_img))])
-        newhdul.writeto(os.path.join(chopres_dir, "chopres_"+files[i].name),
-                        overwrite=True)
-        newhdul.close()
 
-        # Write image to file
-        newhdul = fits.HDUList([fits.PrimaryHDU(data=(highfreq))])
-        newhdul.writeto(os.path.join(highfreq_dir, "highfreq_"+files[i].name),
-                        overwrite=True)
-        newhdul.close()
+        elif registration_method == "Grid":
 
-        return offset[0], offset[1], np.nanstd(aligned_img), np.nanstd(highfreq)
+            for k in range(iterations):
+
+                xcho, ycho = hf.grid_alignment(chop_ref, convolved_frame, px, py,
+                                               -search_rad/(2**k)+xcho,
+                                               search_rad/(2**k)+xcho, 5,
+                                               -search_rad/(2**k)+ycho,
+                                               search_rad/(2**k)+ycho, 5)
+            offset = (xcho, ycho)
+            
+        elif ((registration_method == "COBYLA") or (registration_method == "Powell")):
+
+            def minimizefunc(offset):
+                
+                bad = convolve_fft(np.nanmedian(chop_ref)*hf.align_frame(convolved_frame, px, py, (0,0),
+                                                                         offset, method="linear")/chop_ref,
+                                   Gaussian2DKernel(10))
+                bad -= convolve_fft(np.pad(bad[edge_cut:-1*edge_cut, edge_cut:-1*edge_cut], 50+edge_cut, mode='edge'),
+                                    Ring2DKernel(30, 24))[50:-50, 50:-50]
+                
+                return np.std(bad)
+            
+            res = minimize(minimizefunc, [1, 1], method=registration_method, bounds=[(-20, 20), (-20, 20)])
+
+            offset = (res.x[0], res.x[1])
+
+        else:
+
+            if offsets is not None:
+                offset = offsets[i]
+            else:
+                raise ValueError("Invalid registration method.")
+
+        if save_file:
+            
+            # Use offsets to align the image
+            aligned_img = hf.align_frame(convolved_frame, px, py, (0,0), offset,
+                                         method=interp_method)        
+                                   
+            # Write image to file
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=(aligned_img))])
+            newhdul.writeto(os.path.join(chopres_dir, "chopres_"+files[i].name),
+                            overwrite=True)
+            newhdul.close()
+
+            # Write image to file
+            newhdul = fits.HDUList([fits.PrimaryHDU(data=(highfreq))])
+            newhdul.writeto(os.path.join(highfreq_dir, "highfreq_"+files[i].name),
+                            overwrite=True)
+            newhdul.close()
+
+            return offset[0], offset[1], np.nanstd(aligned_img), np.nanstd(highfreq)
+
+        else:
+
+            return offset[0], offset[1], np.nanstd(convolved_frame), np.nanstd(highfreq)
 
 class SubtractBackground(object):
 
@@ -1294,8 +1345,10 @@ def parallelized_chop_subtraction(files, chops, prefix='', threadcount=50):
     
     return chop_subtracted_files
 
-def chop_align(files, chops, interp_method="linear", ref_index=None, smooth=3,
-               channel_edges=[127, 255, 383], prefix='', threadcount=50):
+def chop_align(files, chops, interp_method="linear", registration_method="COBYLA",
+               ref_index=None, offsets=None, smooth=9, edge_cut=3,
+               search_rad=16, iterations=7, channel_edges=[127, 255, 383], prefix='',
+               threadcount=50, save_file=False):
     
     """
     Aligns background of PSF subtracted files using FFT alignment.
@@ -1381,13 +1434,15 @@ def chop_align(files, chops, interp_method="linear", ref_index=None, smooth=3,
          offset_y,
          chopres_stds,
          highfreq_stds) =zip(*tqdm(pool.imap(ChopAlign((files, chops, chopres_dir, highfreq_dir,
-                                                            reference, px, py, ref_index, smooth,
-                                                            channel_edges, interp_method)),
+                                                        reference, px, py, ref_index, smooth,
+                                                        edge_cut, channel_edges, interp_method,
+                                                        registration_method, search_rad,
+                                                        iterations, offsets, save_file)),
                                       range(len(files))), total=len(files),
                             desc = "Aligning frames..."))
 
     offsets = np.vstack((np.asarray(offset_x), np.asarray(offset_y))).T
-    
+
     # Get file paths
     chopres_files = sorted(list(pathlib.Path(str(chopres_dir)).rglob('*.fits')))
     chopres_files = np.asarray([a for a in chopres_files if a.name[0]!='.'\
@@ -1639,7 +1694,7 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
         wvl_interp, relative_flux = hf.calculate_expected_flux(stellar_temp)
         
         # Fit an airy disk to the PSF of the first frame
-        reffit, lbtfit, trifit = hf.empirical_psf_fit(first_cutout, wvl_interp, relative_flux,
+        reffit, lbtfit, trifit = hf.seq_empirical_psf_fit(first_cutout, wvl_interp, relative_flux,
                                                       model_trefoil=model_trefoil)
         '''
         Create airy disk reference for aligning frames,

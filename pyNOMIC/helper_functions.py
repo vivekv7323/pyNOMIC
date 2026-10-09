@@ -14,6 +14,7 @@ from astropy.coordinates import SkyCoord, Angle, EarthLocation
 from astropy.time import Time
 from astropy.convolution import (convolve_fft,
                                  Gaussian1DKernel,
+                                 Gaussian2DKernel,
                                  Ring2DKernel)
 
 from scipy.stats import linregress
@@ -340,6 +341,42 @@ class RawPSFMaxima(object):
 
         return np.nanmax(img)
 
+
+class EmpiricalPSF:
+
+    def __init__(self, wvl_interp, relative_flux, ravel=True,
+                 model_trefoil=True, model_ghost=True, model_bloom=True):
+
+        self.ravel = ravel
+        self.relative_flux = relative_flux
+        self.wvl_interp = wvl_interp
+        self.model_trefoil = model_trefoil
+        self.model_ghost = model_ghost
+        self.model_bloom = model_bloom
+    
+    def __call__(self, xy, *args):
+
+        model = (args[0]*np.mean(modified_airy_disk(xy, self.relative_flux, self.wvl_interp,
+                                                    args[2], args[3], 0, args[4], args[5],
+                                    args[6]), axis=0)/np.mean(self.relative_flux) + args[1])        
+        
+        if self.ravel == True:
+            model = model.ravel()
+
+        if self.model_trefoil == True:
+            model += center_triangle(xy, *args[7:12], args[5],
+                                        args[6], *args[12:14], ravel=self.ravel)
+        if self.model_ghost == True:
+            model += angular_gauss(xy, *args[14:18], 
+                                      args[5], args[6], args[18], 0, ravel=self.ravel)
+        if self.model_bloom == True:
+            model += (angular_gauss(xy, *args[19:23],
+                                       args[5], args[6], args[23], 0, ravel=self.ravel) +
+                      angular_gauss(xy, *args[24:28],
+                                       args[5], args[6], args[28], 0, ravel=self.ravel)) 
+
+        return model
+            
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
@@ -1141,7 +1178,30 @@ def center_triangle(xy, amp, amp2, sigma, sigma2, phase, x0, y0, r0, r02, ravel=
     else:
         return model
 
-def empirical_psf_fit(cutout, wvl_interp, relative_flux, model_trefoil=True, use_error=True):
+def angular_gauss(xy, amp, sigma, sigma2, phase, x0, y0, r0, offset, ravel=True):
+
+    '''
+    Models a lobe using a Gaussian function smeared along theta.
+    '''
+
+    x, y  = xy
+
+    rad = np.sqrt((x-x0)**2 + (y-y0)**2)
+
+    theta = np.abs(np.arctan2((x-x0), (y-y0)) + phase - np.pi/2)
+
+    theta[theta > np.pi] = 2*np.pi - theta[theta > np.pi]
+
+    model = (np.exp(-1*(theta/sigma2)**2)*amp*np.exp(-1*((rad-r0)/sigma)**2) +
+             offset)
+
+    if ravel == True:
+        return model.ravel()
+    else:
+        return model
+
+def seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
+                          model_trefoil=True, use_error=True):
 
     """
     Fit an empirically derived PSF to an image cutout.
@@ -1214,8 +1274,8 @@ def empirical_psf_fit(cutout, wvl_interp, relative_flux, model_trefoil=True, use
     
     cutout_shape = np.shape(cutout)
 
-    wx = np.linspace(0, cutout_shape[0]-1, cutout_shape[0])
-    wy = np.linspace(0, cutout_shape[1]-1, cutout_shape[1])
+    wx = np.linspace(0, cutout_shape[1]-1, cutout_shape[1])
+    wy = np.linspace(0, cutout_shape[0]-1, cutout_shape[0])
     wx, wy = np.meshgrid(wx, wy)
 
     if use_error:
@@ -1295,6 +1355,88 @@ def empirical_psf_fit(cutout, wvl_interp, relative_flux, model_trefoil=True, use
             
     else:
         return reffit, lbtfit, np.full(7, np.nan)
+
+def joint_empirical_psf_fit(cutout, wvl_interp, relative_flux,
+                            model_trefoil=True, model_ghost=True,
+                            model_bloom=True, use_error=True):
+    
+    cutout_shape = np.shape(cutout)
+
+    wx = np.linspace(0, cutout_shape[1]-1, cutout_shape[1])
+    wy = np.linspace(0, cutout_shape[0]-1, cutout_shape[0])
+    wx, wy = np.meshgrid(wx, wy)
+
+    if model_bloom == True:
+        arr_len = 29
+    elif model_ghost == True:
+        arr_len = 19
+    elif model_trefoil == True:
+        arr_len = 14
+    else:
+        arr_len = 7
+
+    if use_error:
+        error = distance_map((0.5*cutout_shape[1]-0.5, 0.5*cutout_shape[0]-0.5),
+                                cutout_shape[0], cutout_shape[1]).ravel()
+        error *= np.std(cutout) / np.max(error)
+    else:
+        error = None
+        
+    try:
+        # Run curve_fit to get airy best fit parameters
+        reffit, _ = curve_fit(airy_disk, (wx, wy), cutout.ravel(), sigma=error,
+                              p0=[np.max(cutout), 30,30, -1,
+                                  0, 0.5*cutout_shape[0], 0.5*cutout_shape[1]],
+                              bounds=([0, 1, 1, 1*-np.inf, 0, 1, 1],
+                                      [10*np.max(cutout), 100, 100, np.inf, 2*np.pi,
+                                       cutout_shape[0], cutout_shape[1]]))
+    except:
+        return np.full(7, np.nan), np.full(arr_len, np.nan)
+
+    lbt_p0 = [reffit[0], reffit[3], 8, 1, reffit[4], reffit[5], reffit[6]]
+    lbt_low_bound = [0, 1*-np.inf, 6, .5, 0, reffit[5] - 1, reffit[6] - 1]
+    lbt_up_bound = [10*np.max(cutout), np.inf, 10, 2, 2*np.pi, reffit[5]+1, reffit[6]+1]
+    tri_p0=[]
+    tri_low_bound=[]
+    tri_up_bound=[]
+            
+    if model_trefoil:
+        
+        residual = cutout - airy_disk((wx, wy), *reffit, ravel=False)
+
+        tri_p0 = [1e-4, 1e-4, 9, 9, 5.2, 14.38, 14.38*np.sqrt(3)]
+        tri_low_bound = [0, 0, 1, 1, -np.pi, 1, 1]
+        tri_up_bound = [10*np.max(residual),10*np.max(residual),
+                                       20, 20, 2*np.pi, 40, 40]
+
+        if model_ghost:
+
+            tri_p0 += [np.max(residual), 7, .45, 0, 28]
+            tri_low_bound += [0, 1, 0, -1, 5]
+            tri_up_bound += [10*np.max(residual), 15, 1, 1, 50]
+
+            if model_bloom:
+
+                tri_p0 += [0.4*np.max(residual), 7, .3, 1.57, 32,
+                           0.4*np.min(residual), 7, .3, 4.5, 32]
+                tri_low_bound += [0, 1, 0, .8, 5, 10*np.min(residual), 1, 0, 3.4, 5]
+                tri_up_bound += [10*np.max(residual), 14, .4, 2.4, 50, 0, 14, .7, 5.5, 50]
+
+    empirical_psf = EmpiricalPSF(wvl_interp, relative_flux, ravel=True,
+                                 model_trefoil=model_trefoil,
+                                 model_ghost=model_ghost,
+                                 model_bloom=model_bloom)  
+    
+    if True:
+        # Run curve_fit to get best fit parameters of trefoil from the residual
+        lbtfit, _ = curve_fit(empirical_psf, (wx, wy), cutout.ravel(),
+                              p0=lbt_p0+tri_p0, bounds=(lbt_low_bound+tri_low_bound,
+                                                        lbt_up_bound+tri_up_bound), maxfev=10**5)
+        
+    else:
+        lbtfit = np.full(arr_len, np.nan)
+        
+    return reffit, lbtfit
 
 def simple_highpass(img, psf_loc, array_shape, highpassrad, fwhm, use_mask=True):
 
@@ -1408,6 +1550,28 @@ def align_frame(frame, px, py, padding, offset, method="cubic"):
     image = interp((X, Y))
 
     return image
+
+def grid_alignment(ref, target, px, py, xmin, xmax,
+                   xspace, ymin, ymax, yspace, edge_cut=3):
+
+    xlist = np.linspace(xmin, xmax, xspace)
+    xindices = np.arange(len(xlist))
+
+    ylist = np.linspace(ymin, ymax, yspace)
+    yindices = np.arange(len(ylist))
+
+    mymap = np.zeros((xspace, yspace))
+    
+    for i in xindices:
+        for j in yindices:
+            offset = (xlist[i], ylist[j])
+            bad = convolve_fft(np.nanmedian(ref)*align_frame(target, px, py, (0,0), offset, method="linear")/ref, Gaussian2DKernel(10))
+            bad -= convolve_fft(np.pad(bad[edge_cut:-1*edge_cut, edge_cut:-1*edge_cut], 50+edge_cut, mode='edge'), Ring2DKernel(30, 24))[50:-50, 50:-50]
+            mymap[i, j] = np.std(bad)
+            
+    loc = np.where(mymap == np.min(mymap))
+    
+    return (xlist[loc[0]][0], ylist[loc[1]][0])
 
 def calc_para_angles(lbt_lst, lbt_ra, lbt_dec):
     
