@@ -10,7 +10,7 @@ from astropy.io import fits
 from astropy.convolution import (convolve_fft, Box2DKernel,
                                  Ring2DKernel, Gaussian2DKernel)
 
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, minimize
 from scipy.ndimage import median_filter
 from scipy.interpolate import NearestNDInterpolator
 
@@ -68,9 +68,9 @@ class PSFSubtraction(object):
             Enables removal of psf residual from trefoil through
             highpass filtering.
         residual_handling: string
-            Enables removal of psf residual through highpass filtering "remove",
-            or replacement using adjacent chop frames "replace",
-            or nothing (None).
+            Enables removal of psf residual through highpass filtering
+            "remove", or replacement using adjacent chop frames
+            "replace", or nothing (None).
         """
         
         self.params = params
@@ -95,8 +95,6 @@ class PSFSubtraction(object):
             Airy disk fitting parameters
         lbtfit: 1D numpy array
             Empirical PSF fitting parameters
-        trifit: 1D numpy array
-            Trefoil PSF fitting parameters
         """
         
         (psf_subtracted_dir, files, chops, maxima, badmap, starmasks,
@@ -162,39 +160,43 @@ class PSFSubtraction(object):
             failcode = 0
 
             # Fit cutout to get empirical psf parameters
-            reffit, lbtfit, trifit = hf.seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
-                                                          model_trefoil=remove_trefoil)
+            reffit, lbtfit = hf.seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
+                                                      model_trefoil=remove_trefoil)
+
+            empirical_psf = hf.EmpiricalPSF(wvl_interp, relative_flux, ravel=False,
+                                            model_trefoil=remove_trefoil, model_ghost=False,
+                                            model_bloom=False)
             if not np.isnan(reffit[0]):
-                # Get origin of the PSF in the frame
-                origin = (int(maximum[1])-windowsize+reffit[5],
-                          int(maximum[0])-windowsize+reffit[6])
 
                 if not np.isnan(lbtfit[0]):
+                    
+                    # Get origin of the PSF in the frame
+                    origin = (int(maximum[1])-windowsize+lbtfit[5],
+                              int(maximum[0])-windowsize+lbtfit[6])
+                    
                     # Create psf model by integrating over wavelength
-                    psf_model = lbtfit[0]*np.mean(hf.modified_airy_disk((nx, ny), relative_flux,
-                                                                        wvl_interp, lbtfit[2], lbtfit[3],
-                                                                        0, reffit[4], origin[0],
-                                                                        origin[1]),
-                                                  axis=0)/np.mean(relative_flux) + lbtfit[1]
+                    psf_model = empirical_psf((nx, ny), *lbtfit[:5],
+                                              origin[0], origin[1], *lbtfit[7:])
+                    
                 else:
+                    # Get origin of the PSF in the frame
+                    origin = (int(maximum[1])-windowsize+reffit[5],
+                              int(maximum[0])-windowsize+reffit[6])
+                    
                     # Create psf model with airy disk
-                    psf_model = hf.airy_disk((nx, ny), reffit[0], reffit[1], reffit[2], reffit[3],
-                                             reffit[4], reffit[5], reffit[6], ravel=False)
+                    psf_model = hf.airy_disk((nx, ny), *reffit[:5], origin[0],
+                                             origin[1], ravel=False)
                     failcode += 10
-                
-                if remove_trefoil and ~np.isnan(trifit[0]):
-                    # Add trefoil model
-                    psf_model += hf.center_triangle((nx, ny), trifit[0], trifit[1], trifit[2],
-                                                    trifit[3], trifit[4], origin[0], origin[1],
-                                                    trifit[5], trifit[6], ravel=False)
-    
-                # Create background model by subtracting the psf model and convolving with ring kernel
-                bg_model = convolve_fft(subtracted_frame - psf_model, Ring2DKernel(3*smooth, 2*smooth))
+
+                # Create background model by subtracting the psf model
+                # and convolving with ring kernel
+                bg_model = convolve_fft(subtracted_frame - psf_model,
+                                        Ring2DKernel(3*smooth, 2*smooth))
             else:
-                return np.nan, np.nan, 111, reffit, lbtfit, trifit
+                return np.nan, np.nan, 111, reffit, lbtfit
 
         # Keep track of trifit failure if remove_trefoil is enabled
-        if remove_trefoil and np.isnan(trifit[0]):
+        if remove_trefoil and np.isnan(lbtfit[7]):
             failcode += 1
         
         if residual_handling is not None:
@@ -221,8 +223,9 @@ class PSFSubtraction(object):
                         psf_model = psf_model*flats[1]/np.nanmedian(flats[1])
 
                 # Remove residual
-                final = (img - psf_model)*(1-psfrem) + (img - psf_model - residual_bg +
-                                                        grad)*psfrem
+                final = ((img - psf_model)*(1-psfrem) +
+                         (img - psf_model - residual_bg + grad)*psfrem)
+                
             elif residual_handling == "replace":
 
                 final = img - psf_model
@@ -251,7 +254,7 @@ class PSFSubtraction(object):
                         overwrite=True)
         newhdul.close()
 
-        return origin[1], origin[0], failcode, reffit, lbtfit, trifit
+        return origin[1], origin[0], failcode, reffit, lbtfit
 
 
 class PSFSubRedux(object):
@@ -281,8 +284,6 @@ class PSFSubRedux(object):
             Airy disk fitting parameters corresponding to each file.
         lbtfits: 2D numpy array
             Empirical PSF fitting parameters corresponding to each file.
-        trifits: 2D numpy array
-            Trefoil fitting parameters corresponding to each file.
         badmap: 2D image array
             Bad pixel map, where bad pixels are set to 0 and all other
             pixels are set to 1.
@@ -302,9 +303,9 @@ class PSFSubRedux(object):
         smooth: integer
             Radius of smoothing kernel, divided by 5
         residual_handling: string
-            Enables removal of psf residual through highpass filtering "remove",
-            or replacement using adjacent chop frames "replace",
-            or nothing (None).
+            Enables removal of psf residual through highpass filtering
+            "remove",  or replacement using adjacent chop frames
+            "replace", or nothing (None).
         """
         
         self.params = params
@@ -326,7 +327,7 @@ class PSFSubRedux(object):
         """
         
         (psf_subtracted_dir, files, chops, maxima, failcodes,
-         reffits, lbtfits, trifits, badmap, flats, wvl_interp,
+         reffits, lbtfits, badmap, flats, wvl_interp,
          relative_flux, windowsize, fit_reject_criterion,
          nbg, smooth, residual_handling) = self.params
 
@@ -349,33 +350,30 @@ class PSFSubRedux(object):
 
         maximum = np.mean(maxima[fit_indices], axis=0)
         reffit = np.mean(reffits[fit_indices], axis=0)
-        
-        # Get origin of the PSF in the frame
-        origin = (int(maximum[1])-windowsize+reffit[5],
-                  int(maximum[0])-windowsize+reffit[6])
 
         if (np.isin(0, failcodes[fit_indices]) |\
             np.isin(1, failcodes[fit_indices])):
 
+            # Get origin of the PSF in the frame
+            origin = (int(maximum[1])-windowsize+lbtfit[5],
+                      int(maximum[0])-windowsize+lbtfit[6])
+
             lbtfit = np.nanmean(lbtfits[fit_indices], axis=0)
-            # Create psf model by integrating over wavelength
-            psf_model = lbtfit[0]*np.mean(hf.modified_airy_disk((nx, ny), relative_flux,
-                                                                wvl_interp, lbtfit[2], lbtfit[3],
-                                                                0, reffit[4], origin[0],
-                                                                origin[1]),
-                                          axis=0) + lbtfit[1]
-        else:
-            # Create psf model with airy disk
-            psf_model = hf.airy_disk((nx, ny), reffit[0], reffit[1], reffit[2], reffit[3],
-                                     reffit[4], reffit[5], reffit[6], ravel=False)
-        
-        if np.isin(False, np.isnan(trifits[fit_indices])):
+
+            empirical_psf = hf.EmpiricalPSF(wvl_interp, relative_flux, ravel=False,
+                                            model_trefoil=np.isin(False,
+                                                                  np.isnan(lbtfits[fit_indices])),
+                                            model_ghost=False, model_bloom=False)
             
-            trifit = np.nanmean(trifits[fit_indices], axis=0)
-            # Add trefoil model
-            psf_model += hf.center_triangle((nx, ny), trifit[0], trifit[1], trifit[2],
-                                            trifit[3], trifit[4], origin[0], origin[1],
-                                            trifit[5], trifit[6], ravel=False)
+            psf_model = empirical_psf((nx, ny), *lbtfit[:5], origin[0], origin[1], *lbtfit[7:])
+            
+        else:
+            # Get origin of the PSF in the frame
+            origin = (int(maximum[1])-windowsize+reffit[5],
+                      int(maximum[0])-windowsize+reffit[6])
+        
+            # Create psf model with airy disk
+            psf_model = hf.airy_disk((nx, ny), *reffit[:5], origin[0], origin[1], ravel=False)
             
         if residual_handling is not None:
 
@@ -409,8 +407,9 @@ class PSFSubRedux(object):
                         psf_model = psf_model*flats[1]/np.nanmedian(flats[1])
 
                 # Remove residual
-                final = (img - psf_model)*(1-psfrem) + (img - psf_model - residual_bg +
-                                                        grad)*psfrem
+                final = ((img - psf_model)*(1-psfrem) +
+                         (img - psf_model - residual_bg + grad)*psfrem
+                         
             elif residual_handling == "replace":
 
                 final = img - psf_model
@@ -430,6 +429,7 @@ class PSFSubRedux(object):
                     psf_model = psf_model*flats[0]/np.nanmedian(flats[0])
                 else:
                     psf_model = psf_model*flats[1]/np.nanmedian(flats[1])
+                    
             final = img - psf_model
 
         unsubtracted.close()
@@ -503,7 +503,14 @@ class ChopAlign(object):
         chops: string array
             List of chop states corresponding to the file list, entries
             are either "CHOP_A" or "CHOP_B"
-        directory: string/Path object
+        maxima: float tuple array
+            Tuples encoding location of the PSF in the images
+        offsets: tuple
+            Tuple containing the total offset of the PSF from
+            the original reference image.
+        chopres_dir: string/Path object
+            Directory where images will be saved
+        highfreq_dir: string/Path object
             Directory where images will be saved
         reference: 2D numpy array
             Reference image for FFT alignment
@@ -518,13 +525,47 @@ class ChopAlign(object):
         channel_edges: list of integers
             List containing indices corresponding to the central row of
             channel edges
+        striped_regions: list
+            List containing indices corresponding to regions of
+            the image needing destriping. Each entry contains four integers
+            for slicing the image: [0:1, 2:3]
+        biased_columns: list
+            List containing indices corresponding to biased columns
+        biased_rows: list
+            List containing indices corresponding to biased rows
+        vertical_biases: list
+            List containing indices corresponding to columns separating
+            regions of the image with different biases
+        horizontal_biases: list
+            List containing indices corresponding to rows separating
+            regions of the image with different biases
         interp_method: string
             Interpolation method for
             scipy.interp.RegularGridInterpolator,
             default is cubic interpolation. Linear interpolation is much
             faster but imprecise especially at the center of the PSF.
+        registration_method: string
+            Method by which to align chop residuals. Default
+            is grid alignment.
+        nbg: integer
+            Number of frames to use in chop background subtraction
+        smooth: integer
+            Radius of smoothing kernel, divided by 5
+        edge_cut: integer
+            Number of pixels to remove at the edges of images
+        search_rad: integer
+            Search radius in pixels for finding chop offsets.
+        iterations: integer
+            Number of iterations for grid alignment
+        nan_mask_radius: integer
+            Radius of the nan mask used to block out PSF residuals.
+        create_residual: boolean
+            Enables creating chop residual frames.
+        save_file: boolean
+            Enables saving chop residual frames and high frequency
+            component frames.
         """
-         
+        
         self.params = params
     
     def __call__(self, i):
@@ -541,37 +582,26 @@ class ChopAlign(object):
             X-axis offset between reference and image
         offset[1]: float
             Y-axis offset between reference and image
+        prefit_offset[0]: float
+            Prefit X-axis offset between reference and image
+        prefit_offset[1]: float
+            Prefit Y-axis offset between reference and image
         chopres_std: float
             Standard deviation of the chop residual map
         highfreq_std: float
             Standard deviation of the high frequency component
         """
         
-        (files, chops, chopres_dir, highfreq_dir, reference, px, py,
-         ref_index, smooth, edge_cut, channel_edges, interp_method,
-         registration_method, search_rad, iterations, offsets, save_file) = self.params
+        (files, chops, maxima, offsets, chopres_dir, highfreq_dir,
+         reference, px, py, channel_edges, striped_regions,
+         biased_columns, biased_rows, vertical_biases,
+         horizontal_biases, interp_method, registration_method,
+         ref_index, smooth, nbg, edge_cut, search_rad, iterations,
+         nan_mask_radius, create_residual, save_file) = self.params
 
         hdul = fits.open(files[i])
         img = hdul[0].data
         hdul.close()
-
-        # Chop subtraction
-        subtracted_frame = hf.chop_subtraction(img, i, chops[i], files, [0,0], 1,
-                                               correction_method="subtraction")
-
-        # Remove channel edges with interpolation 
-        for channel_edge in channel_edges:
-            repaired_frame = hf.repair_channel_edges(subtracted_frame, channel_edge)
-
-        # Convolve with a Gaussian kernel to remove high frequencies
-        convolved_frame = convolve_fft(np.pad(repaired_frame[edge_cut:-1*edge_cut,
-                                                             edge_cut:-1*edge_cut],
-                                              10*smooth+edge_cut, mode='edge'),
-                                       Gaussian2DKernel(smooth))[10*smooth:-10*smooth,
-                                                                 10*smooth:-10*smooth]
-
-        # Preserve high frequency information
-        highfreq = img - convolved_frame
 
         if chops[ref_index] == chops[i]:
 
@@ -581,70 +611,171 @@ class ChopAlign(object):
 
             chop_ref = -1*reference
 
-        if registration_method == "FFT":
-
-            # Do FFT registration to find offsets
-            offset = chi2_shift(chop_ref, convolved_frame, upsample_factor='auto',
-                                return_error=False)
-
-
-        elif registration_method == "Grid":
-
-            for k in range(iterations):
-
-                xcho, ycho = hf.grid_alignment(chop_ref, convolved_frame, px, py,
-                                               -search_rad/(2**k)+xcho,
-                                               search_rad/(2**k)+xcho, 5,
-                                               -search_rad/(2**k)+ycho,
-                                               search_rad/(2**k)+ycho, 5)
-            offset = (xcho, ycho)
+        if create_residual:
             
-        elif ((registration_method == "COBYLA") or (registration_method == "Powell")):
+            # Chop subtraction
+            repaired_frame = subtract_detector(img, i, chops[i], files,
+                                               channel_edges=channel_edges,
+                                               striped_regions=striped_regions,
+                                               biased_columns=biased_columns,
+                                               biased_rows=biased_rows,
+                                               vertical_biases=vertical_biases,
+                                               horizontal_biases=horizontal_biases)
+    
+            # Convolve with a Ring kernel to remove low frequencies
+            bg = convolve_fft(np.pad(repaired_frame[edge_cut:-1*edge_cut, edge_cut:-1*edge_cut],
+                                     10*smooth+edge_cut, mode='edge'),
+                              Ring2DKernel(10*smooth, 8*smooth))[10*smooth:-10*smooth,
+                                                                 10*smooth:-10*smooth]
+        
+            # Convolve with a Gaussian kernel to remove high frequencies
+            convolved_frame = convolve_fft(np.pad(repaired_frame[edge_cut:-1*edge_cut,
+                                                                 edge_cut:-1*edge_cut],
+                                                  10*smooth+edge_cut, mode='edge'),
+                                           Gaussian2DKernel(smooth))[10*smooth:-10*smooth,
+                                                                     10*smooth:-10*smooth] - bg
+            # Preserve high frequency information
+            highfreq = img - convolved_frame
 
-            def minimizefunc(offset):
-                
-                bad = convolve_fft(np.nanmedian(chop_ref)*hf.align_frame(convolved_frame, px, py, (0,0),
-                                                                         offset, method="linear")/chop_ref,
-                                   Gaussian2DKernel(10))
-                bad -= convolve_fft(np.pad(bad[edge_cut:-1*edge_cut, edge_cut:-1*edge_cut], 50+edge_cut, mode='edge'),
-                                    Ring2DKernel(30, 24))[50:-50, 50:-50]
-                
-                return np.std(bad)
+            highfreqstd = np.nanstd(highfreq)
+
+        else:
+
+            convolved_frame = np.copy(img)
+
+            highfreqstd = np.nan
+
+        if maxima is not None:
             
-            res = minimize(minimizefunc, [1, 1], method=registration_method, bounds=[(-20, 20), (-20, 20)])
+            # Locate adjacent images of the same chop state
+            bg_indices = np.arange(i - 2*nbg + 1, i + 2*nbg, 2)
+            
+            # Exclude nonexistent indices and the current index
+            bg_indices = bg_indices[((bg_indices >= 0) &
+                                     (bg_indices < len(files)) & (bg_indices != i))] 
+    
+            masked_frame = np.copy(convolved_frame)
 
-            offset = (res.x[0], res.x[1])
+            # Mask out stars                
+            masked_frame[hf.circular_mask(np.flip(maxima[i]), nan_mask_radius,
+                                          len(px), len(py))] = np.nan
+        
+            masked_frame[hf.circular_mask(np.flip(np.nanmean(maxima[bg_indices], axis=0)),
+                                          nan_mask_radius, len(px), len(py))] = np.nan
+        else:
+
+            masked_frame = np.copy(convolved_frame)
+
+
+        if registration_method is not None:
+            
+            if registration_method == "FFT":
+    
+                # Do FFT registration to find offsets
+                offset = chi2_shift(chop_ref, masked_frame, upsample_factor='auto',
+                                    return_error=False)
+    
+    
+            elif registration_method == "Grid":
+    
+                xcho, ycho = (0,0)
+
+                # Loop over grids to narrow down minimum
+                for k in range(iterations):
+    
+                    xcho, ycho, _ = hf.grid_alignment(chop_ref, masked_frame, px, py,
+                                                      -search_rad/(2**k)+xcho,
+                                                      search_rad/(2**k)+xcho, 5,
+                                                      -search_rad/(2**k)+ycho,
+                                                      search_rad/(2**k)+ycho, 5)
+                offset = (xcho, ycho)
+                
+            elif ((registration_method == "COBYLA") or (registration_method == "Powell")):
+
+                # Define minimization function using standard deviation        
+                def minimizefunc(offset):
+        
+                    aligned_img = hf.align_frame(masked_frame, px, py, (0,0),
+                                                    offset, method="linear")
+    
+                    return np.nanstd(aligned_img - chop_ref)
+                
+                res = minimize(minimizefunc, [1, 1], method=registration_method, 
+                               bounds=[(-search_rad, search_rad),
+                                       (-search_rad, search_rad)])
+    
+                offset = (res.x[0], res.x[1])
+
+
+            # Grid alignment using prefit offset
+            xcho, ycho, results = hf.grid_alignment(chop_ref, masked_frame, px, py,
+                                                    round(-.25*search_rad+offset[0]),
+                                                    round(.25*search_rad+offset[0]),
+                                                    round(.5*search_rad),
+                                                    round(-.25*search_rad+offset[1]),
+                                                    round(.25*search_rad+offset[1]),
+                                                    round(.5*search_rad))
+            fit_grid, xlist, ylist = results
+
+
+            # Create axes grid
+            frameh, framew = np.shape(fit_grid)
+            wx = np.linspace(0, framew-1, framew)
+            wy = np.linspace(0, frameh-1, frameh)
+            wx, wy = np.meshgrid(wx, wy)
+
+            prefit_offset = np.copy(offset)
+
+            try:
+
+                # Fit standard deviation grid with a hyperbola
+                chopfit, _ = curve_fit(hf.Hyperbola2D, (wx, wy), fit_grid.ravel(),
+                                       p0=[1e-4, 1e-4, 1, -1, .25*search_rad, .25*search_rad, 0],
+                                       bounds=([0, 0, 0, -2, 0, 0, 0],
+                                               [1, 1, search_rad, 2, .5*search_rad, 
+                                                .5*search_rad, 2*np.pi]))  
+    
+                offset = (chopfit[-3]*(xlist[1] - xlist[0]) + xlist[0],
+                          chopfit[-2]*(ylist[1] - ylist[0]) + ylist[0])
+
+            except:
+
+                pass
 
         else:
 
             if offsets is not None:
                 offset = offsets[i]
             else:
-                raise ValueError("Invalid registration method.")
+                offset = (None, None)
 
-        if save_file:
+            prefit_offset = np.copy(offset)
+
+
+        if save_file and create_residual:
             
-            # Use offsets to align the image
-            aligned_img = hf.align_frame(convolved_frame, px, py, (0,0), offset,
-                                         method=interp_method)        
-                                   
+            if offset[0] is not None:
+                # Use offsets to align the image
+                aligned_img = hf.align_frame(convolved_frame, px, py, (0,0), offset,
+                                             method=interp_method)
+            else:
+                aligned_img = np.copy(convolved_frame)    
+        
             # Write image to file
             newhdul = fits.HDUList([fits.PrimaryHDU(data=(aligned_img))])
             newhdul.writeto(os.path.join(chopres_dir, "chopres_"+files[i].name),
                             overwrite=True)
             newhdul.close()
-
+    
             # Write image to file
             newhdul = fits.HDUList([fits.PrimaryHDU(data=(highfreq))])
             newhdul.writeto(os.path.join(highfreq_dir, "highfreq_"+files[i].name),
                             overwrite=True)
             newhdul.close()
 
-            return offset[0], offset[1], np.nanstd(aligned_img), np.nanstd(highfreq)
+        return (offset[0], offset[1], prefit_offset[0], prefit_offset[1],
+                np.nanstd(masked_frame), highfreqstd)
 
-        else:
-
-            return offset[0], offset[1], np.nanstd(convolved_frame), np.nanstd(highfreq)
 
 class SubtractBackground(object):
 
@@ -816,8 +947,7 @@ class SubtractBackground(object):
         # Subtract convolved background
 
         convolve_bg = convolve_fft(np.pad(psf_subtracted_frame, 50, mode='edge'),
-                                                           Ring2DKernel(5*smooth, 4*smooth))\
-                                                               [50:-50, 50:-50]
+                                   Ring2DKernel(5*smooth, 4*smooth))[50:-50, 50:-50]
 
         subtracted_frame -= convolve_bg
         
@@ -919,9 +1049,10 @@ class RegisterFrames(object):
             Airy disk fit parameters if airy disk fitting is enabled.
         """
 
-        (files, subtracted_dir, aligned_dir, badmap, starmask, padding, center_padding, px, py,
-         wx, wy, reference, first_maximum, maxima, windowsize, alignment_method, interp_method,
-         actmax, boxcar, save_files) = self.params
+        (files, subtracted_dir, aligned_dir, badmap, starmask,
+         padding, center_padding, px, py, wx, wy, reference,
+         first_maximum, maxima, windowsize, alignment_method, 
+         interp_method, actmax, boxcar, save_files) = self.params
 
         # Open file
         hdul = fits.open(os.path.join(subtracted_dir, "subtracted_"+files[i].name))
@@ -1209,7 +1340,7 @@ def subtract_psfs(files, chops, stellar_temp,
         Half width/height of the cutout image
         (which is 1:1 aspect ratio)
     nbg (optional): integer
-        Number of frames to use in rolling background subtraction
+        Number of frames to use in chop background subtraction
     smooth (optional): integer
         Radius of smoothing kernel, divided by 5
     recur_iteration (optional): integer
@@ -1261,8 +1392,7 @@ def subtract_psfs(files, chops, stellar_temp,
          max_y,
          failcodes,
          reffits,
-         lbtfits,
-         trifits) = zip(*tqdm(pool.imap(PSFSubtraction((psf_subtracted_dir, files,
+         lbtfits) = zip(*tqdm(pool.imap(PSFSubtraction((psf_subtracted_dir, files,
                                                         chops, maxima, badmap, starmask,
                                                         flats, wvl_interp, relative_flux,
                                                         windowsize, nbg, smooth, recur_iteration,
@@ -1270,8 +1400,8 @@ def subtract_psfs(files, chops, stellar_temp,
                                         range(len(files))), total=len(files),
                               desc="Subtracting PSFs"))
 
-    failcodes, reffits, lbtfits, trifits = (np.asarray(failcodes), np.asarray(reffits),
-                                            np.asarray(lbtfits), np.asarray(trifits))
+    failcodes, reffits, lbtfits = (np.asarray(failcodes), np.asarray(reffits),
+                                            np.asarray(lbtfits))
     
     maxima = np.vstack((np.asarray(max_x), np.asarray(max_y))).T
 
@@ -1284,7 +1414,7 @@ def subtract_psfs(files, chops, stellar_temp,
             (new_max_x,
              new_max_y) = zip(*tqdm(pool.imap(PSFSubRedux((psf_subtracted_dir, files,
                                                            chops, maxima, failcodes,
-                                                           reffits, lbtfits, trifits, badmap,
+                                                           reffits, lbtfits, badmap,
                                                            flats, wvl_interp, relative_flux,
                                                            windowsize, fit_reject_criterion,
                                                            nbg, smooth, residual_handling)),
@@ -1299,7 +1429,7 @@ def subtract_psfs(files, chops, stellar_temp,
                                        if a.name[0]!='.'\
                                        and str(a.parent)==psf_subtracted_dir])
 
-    return psf_subtracted_files, maxima, failcodes, reffits, lbtfits, trifits
+    return psf_subtracted_files, maxima, failcodes, reffits, lbtfits
 
 def parallelized_chop_subtraction(files, chops, prefix='', threadcount=50):
 
@@ -1345,13 +1475,16 @@ def parallelized_chop_subtraction(files, chops, prefix='', threadcount=50):
     
     return chop_subtracted_files
 
-def chop_align(files, chops, interp_method="linear", registration_method="COBYLA",
-               ref_index=None, offsets=None, smooth=9, edge_cut=3,
-               search_rad=16, iterations=7, channel_edges=[127, 255, 383], prefix='',
-               threadcount=50, save_file=False):
+def chop_align(files, chops, maxima=None, offsets=None, channel_edges=[127, 255, 383],
+               striped_regions=[[0, 124, 255, 304, -3], [0, 124, 304, -3, -3]],
+               biased_columns=[303], biased_rows = [], vertical_biases=[255, 303],
+               horizontal_biases=[], interp_method="linear", registration_method="Grid", 
+               ref_index=None,  nbg=1, smooth=9, edge_cut=3, search_rad=16, iterations=2,
+               nan_mask_radius=56, create_residual=True, save_file=False,  prefix='',
+               threadcount=50):
     
     """
-    Aligns background of PSF subtracted files using FFT alignment.
+    Aligns the chop residual background of PSF subtracted files.
 
     Parameters:
     ----------------------
@@ -1360,19 +1493,60 @@ def chop_align(files, chops, interp_method="linear", registration_method="COBYLA
     chops: string array
         List of chop states corresponding to the file list,
         entries are either "CHOP_A" or "CHOP_B"
-    interp_method: string
+    maxima (optional): float tuple array
+        Tuples encoding location of the PSF in the images
+    offsets (optional): tuple
+        Tuple containing the total offset of the PSF from
+        the original reference image.
+    channel_edges: list of integers
+        List containing indices corresponding to the central row of
+        channel edges
+    striped_regions (optional): list
+        List containing indices corresponding to regions of
+        the image needing destriping. Each entry contains four integers
+        for slicing the image: [0:1, 2:3]
+    biased_columns (optional): list
+        List containing indices corresponding to biased columns
+    biased_rows (optional): list
+        List containing indices corresponding to biased rows
+    vertical_biases (optional): list
+        List containing indices corresponding to columns separating
+        regions of the image with different biases
+    horizontal_biases (optional): list
+        List containing indices corresponding to rows separating
+        regions of the image with different biases
+    interp_method (optional): string
         Interpolation method for
         scipy.interp.RegularGridInterpolator,
         default is cubic interpolation. Linear interpolation is much
         faster but imprecise especially at the center of the PSF.
-    ref_index: integer
+    registration_method (optional): string
+        Method by which to align chop residuals. Default
+        is grid alignment.
+    ref_index (optional): integer
         File index of the reference. If None, the index used is the
         median of the sequence.
+    nbg (optional): integer
+        Number of frames to use in chop background subtraction
     smooth: integer
         Radius of smoothing kernel. Default is 3 pixels.
-    channel_edges: list of integers
-        List containing indices corresponding to the central row of
-        channel edges
+    edge_cut (optional): integer
+        Number of pixels to remove at the edges of images
+    search_rad (optional): integer
+        Search radius in pixels for finding chop offsets.
+        Default is 16 pixels. 
+    iterations (optional): integer
+        Number of iterations for grid alignment
+    nan_mask_radius (optional): integer
+        Radius of the nan mask used to block out PSF residuals.
+        Default is 56 pixels.
+    create_residual (optional): boolean
+        Enables creating chop residual frames. Enabled by default, 
+        should only be disabled if input images are chop residual
+        frames.
+    save_file (optional): boolean
+        Enables saving chop residual frames and high frequency
+        component frames. Enabled by default.
     prefix (optional): string
         Prefix to add to directory name when saving image.
     threadcount (optional): integer
@@ -1393,56 +1567,96 @@ def chop_align(files, chops, interp_method="linear", registration_method="COBYLA
     offsets: 2D numpy array
         List of calculated offsets from FFT alignment.
     """
+
+    if save_file:
+
+        # Create directory to save files
+        root_dir = os.path.dirname(os.path.dirname(files[0]))
     
-    # Create directory to save files
-    root_dir = os.path.dirname(os.path.dirname(files[0]))
-    chopres_dir = os.path.join(root_dir, prefix+'chopres_align')
-    highfreq_dir = os.path.join(root_dir, prefix+'highfreq')
-    
-    if not os.path.exists(chopres_dir):
-        os.makedirs(chopres_dir)
-    if not os.path.exists(highfreq_dir):
-        os.makedirs(highfreq_dir)
+        chopres_dir = os.path.join(root_dir, prefix+'chopres_align')
+        highfreq_dir = os.path.join(root_dir, prefix+'highfreq')
+        
+        if not os.path.exists(chopres_dir):
+            os.makedirs(chopres_dir)
+        if not os.path.exists(highfreq_dir):
+            os.makedirs(highfreq_dir)
+    else:
+        
+        chopres_dir = None
+        highfreq_dir = None
 
     # Default to middle index
     if ref_index is None:
         ref_index = int(len(files)/2)
 
     hdul = fits.open(files[ref_index])
-    img = hdul[0].data
+    reference = hdul[0].data
     hdul.close()
 
     # Create alignment grid
-    frameh, framew = np.shape(img)
+    frameh, framew = np.shape(reference)
     px = np.linspace(0, framew-1, framew)
     py = np.linspace(0, frameh-1, frameh)
 
-    # Chop subtract reference
-    reference = hf.chop_subtraction(img, ref_index, chops[ref_index], files, [0,0], 1,
-                                    correction_method="subtraction")
-    # Repair channel edges
-    for channel_edge in channel_edges:
-        reference = hf.repair_channel_edges(reference, channel_edge)
+    if create_residual:
+
+        # Chop subtract reference
+        reference = subtract_detector(reference, ref_index, chops[ref_index], files,
+                                      channel_edges=channel_edges, striped_regions=striped_regions,
+                                      biased_columns=biased_columns, biased_rows=biased_rows
+                                      vertical_biases=vertical_biases,
+                                      horizontal_biases=horizontal_biases)
+        
+        # Convolve with a Ring kernel to remove low frequencies
+        bg = convolve_fft(np.pad(reference[edge_cut:-1*edge_cut, edge_cut:-1*edge_cut],
+                                 10*smooth+edge_cut, mode='edge'),
+                          Ring2DKernel(10*smooth, 8*smooth))[10*smooth:-10*smooth,
+                                                             10*smooth:-10*smooth]
     
-    # Convolve frame
-    reference = convolve_fft(np.pad(reference, 10*smooth, mode='edge'),
-                             Gaussian2DKernel(smooth))[10*smooth:-10*smooth,
-                                                       10*smooth:-10*smooth]
+        # Convolve frame
+        reference = convolve_fft(np.pad(reference[edge_cut:-1*edge_cut, edge_cut:-1*edge_cut],
+                                        10*smooth+edge_cut, mode='edge'),
+                                        Gaussian2DKernel(smooth))[10*smooth:-10*smooth,
+                                                                  10*smooth:-10*smooth] - bg
+
+    if maxima is not None:
+        
+         # Locate adjacent images of the same chop state
+        bg_indices = np.arange(ref_index - 2*nbg + 1, ref_index + 2*nbg, 2)
+        
+        # Exclude nonexistent indices and the current index
+        bg_indices = bg_indices[((bg_indices >= 0) & (bg_indices < len(files)) &
+                                 (bg_indices != ref_index))]
+    
+        reference[hf.circular_mask(np.flip(maxima[ref_index]),
+                                   nan_mask_radius, frameh, framew)] = np.nan
+    
+        reference[hf.circular_mask(np.flip(np.nanmean(maxima[bg_indices], axis=0)),
+                                   nan_mask_radius, frameh, framew)] = np.nan
+         
+    
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
         (offset_x,
          offset_y,
+         prefit_offset_x,
+         prefit_offset_y,
          chopres_stds,
-         highfreq_stds) =zip(*tqdm(pool.imap(ChopAlign((files, chops, chopres_dir, highfreq_dir,
-                                                        reference, px, py, ref_index, smooth,
-                                                        edge_cut, channel_edges, interp_method,
-                                                        registration_method, search_rad,
-                                                        iterations, offsets, save_file)),
+         highfreq_stds) =zip(*tqdm(pool.imap(ChopAlign((files, chops, maxima, offsets, chopres_dir,
+                                                        highfreq_dir, reference, px, py,
+                                                        channel_edges, striped_regions,
+                                                        biased_columns, biased_rows, 
+                                                        vertical_biases, horizontal_biases, 
+                                                        interp_method, registration_method,
+                                                        ref_index, nbg, smooth, edge_cut,
+                                                        search_rad, iterations, nan_mask_radius,
+                                                        create_residual, save_file)),
                                       range(len(files))), total=len(files),
                             desc = "Aligning frames..."))
 
     offsets = np.vstack((np.asarray(offset_x), np.asarray(offset_y))).T
-
+    prefit_offsets = np.vstack((np.asarray(prefit_offset_x), np.asarray(prefit_offset_y))).T
+    
     # Get file paths
     chopres_files = sorted(list(pathlib.Path(str(chopres_dir)).rglob('*.fits')))
     chopres_files = np.asarray([a for a in chopres_files if a.name[0]!='.'\
@@ -1453,7 +1667,7 @@ def chop_align(files, chops, interp_method="linear", registration_method="COBYLA
     highfreq_files = np.asarray([a for a in highfreq_files if a.name[0]!='.'\
                                 and str(a.parent)==highfreq_dir])
     
-    return chopres_files, highfreq_files, chopres_stds, highfreq_stds, offsets
+    return chopres_files, highfreq_files, chopres_stds, highfreq_stds, offsets, prefit_offsets
         
 def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[127, 255, 383],
                         biased_columns=[303], biased_rows = [], striped_regions=[],
@@ -1512,7 +1726,7 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
         Method to correct channel edges,
         either "linear" or "nearestneighbor" interpolation.
     nbg (optional): integer
-        Number of frames to use in rolling background subtraction
+        Number of frames to use in chop background subtraction
     smooth (optional): integer
         Radius of smoothing kernel, divided by 5
     edge_cut (optional): integer
@@ -1543,10 +1757,11 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
                                                                  psf_subtracted_files, chops,
                                                                  channel_edges, biased_columns,
                                                                  striped_regions, vertical_biases,
-                                                                 horizontal_biases, biased_rows, nanrows,
-                                                                 nancols, flats, resflats,
+                                                                 horizontal_biases, biased_rows,
+                                                                 nanrows, nancols, flats, resflats,
                                                                  flat_offsets, correction_method,
-                                                                 channel_method, nbg, smooth, edge_cut)),
+                                                                 channel_method, nbg, smooth,
+                                                                 edge_cut)),
                                              range(len(raw_files))), total=len(raw_files),
                                    desc = "Subtracting backgrounds..."))
 
@@ -1684,8 +1899,8 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
     wx, wy = np.meshgrid(wx, wy)
 
     # Get cutouts of PSFs in both frames
-    first_cutout = first_frame[(int(first_maximum[0])-windowsize):(int(first_maximum[0])+windowsize),
-                               (int(first_maximum[1])-windowsize):(int(first_maximum[1])+windowsize)]
+    first_cutout=first_frame[(int(first_maximum[0])-windowsize):(int(first_maximum[0])+windowsize),
+                             (int(first_maximum[1])-windowsize):(int(first_maximum[1])+windowsize)]
     sec_cutout = sec_frame[(int(sec_maximum[0])-windowsize):(int(sec_maximum[0])+windowsize),
                            (int(sec_maximum[1])-windowsize):(int(sec_maximum[1])+windowsize)]
 
@@ -1694,21 +1909,15 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
         wvl_interp, relative_flux = hf.calculate_expected_flux(stellar_temp)
         
         # Fit an airy disk to the PSF of the first frame
-        reffit, lbtfit, trifit = hf.seq_empirical_psf_fit(first_cutout, wvl_interp, relative_flux,
-                                                      model_trefoil=model_trefoil)
-        '''
-        Create airy disk reference for aligning frames,
-        but centered exactly in the middle of the cutout
-        '''
-        reference = lbtfit[0]*np.mean(hf.modified_airy_disk((wx, wy), relative_flux, wvl_interp,
-                                                            lbtfit[2], lbtfit[3], 0, reffit[4],
-                                                            windowsize-0.5, windowsize-0.5),
-                                      axis=0) + lbtfit[1]
-    
-        if model_trefoil and ~np.isnan(trifit[0]):
-            reference +=  hf.center_triangle((wx, wy), trifit[0], trifit[1], trifit[2],
-                                             trifit[3], trifit[4], windowsize-0.5,
-                                             windowsize-0.5, trifit[5], trifit[6], ravel=False)
+        reffit, lbtfit = hf.joint_empirical_psf_fit(first_cutout, wvl_interp, relative_flux,
+                                                    model_trefoil=True, model_ghost=True,
+                                                    model_bloom=True)
+
+        empirical_psf = hf.EmpiricalPSF(wvl_interp, relative_flux, ravel=False,
+                                        model_trefoil=True, model_ghost=True,
+                                                 model_bloom=True)
+
+        reference = empirical_psf((wx, wy), *lbtfit)
                 
         if alignment_method == "fft":
         
@@ -1848,7 +2057,7 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
     return (original_psf_locs, imgfits, np.shape(first_frame),
             float(first_frame.nbytes), aligned_files)
 
-def mask_files(files, directory, locs, array_shape, nbg=1, nan_mask_radius = 16, threadcount=50):
+def mask_files(files, directory, locs, array_shape, nbg=1, nan_mask_radius=16, threadcount=50):
     
     """
     Mask out circular regions of the image at certain locations.
@@ -1883,8 +2092,8 @@ def mask_files(files, directory, locs, array_shape, nbg=1, nan_mask_radius = 16,
 
     #if __name__ == "__main__":
     with Pool(threadcount) as pool:
-        results = zip(*tqdm(pool.imap(hf.MaskFrames((files, directory, locs, array_shape, nbg,
-                                                     nan_mask_radius)),
+        results = zip(*tqdm(pool.imap(hf.MaskFrames((files, directory, locs, array_shape,
+                                                     nbg, nan_mask_radius)),
                                       range(len(files))), total=len(files),
                            desc="Masking files"))
 
@@ -1894,3 +2103,84 @@ def mask_files(files, directory, locs, array_shape, nbg=1, nan_mask_radius = 16,
     
     return masked_files
 
+def subtract_detector(img, index, chop, files, channel_edges=[127, 255, 383],
+                      striped_regions=[[0, 124, 255, 304, -3],
+                                       [0, 124, 304, -3, -3]],
+                      biased_columns=[303],  biased_rows=[],
+                      vertical_biases=[255], horizontal_biases=[]):
+    """
+    Performs simple background subtraction, of just chop
+    subtraction and detector systematics.
+
+    Parameters:
+    ----------------------
+    image: 2D numpy array
+        Input image.
+    index: integer
+        Index of the image in the file list.
+    chop: string
+        Chop state, either "CHOP_A" or "CHOP_B"
+    files: list or array 
+        List of file paths, sorted 
+    channel_edges (optional): list of integers
+        List containing indices corresponding to the central row of
+        channel edges
+    striped_regions (optional): list
+        List containing indices corresponding to regions of
+        the image needing destriping. Each entry contains four integers
+        for slicing the image: [0:1, 2:3]
+    biased_columns (optional): list
+        List containing indices corresponding to biased columns
+    biased_rows (optional): list
+        List containing indices corresponding to biased rows
+    vertical_biases (optional): list
+        List containing indices corresponding to columns separating
+        regions of the image with different biases
+    horizontal_biases (optional): list
+        List containing indices corresponding to rows separating
+        regions of the image with different biases
+
+    Returns:
+    ----------------------    
+    subtracted_frame: 2D numpy array
+        Output background subtracted image.
+    """
+
+    
+    # Chop subtract reference
+    subtracted_frame = hf.chop_subtraction(img, index, chop, files, [0,0], 1,
+                                    correction_method="subtraction")
+    # Repair channel edges
+    for channel_edge in channel_edges:
+        subtracted_frame = hf.repair_channel_edges(subtracted_frame, channel_edge)
+
+    # Remove vertical lines
+    for biased_column in biased_columns:
+        subtracted_frame = hf.repair_vertical_line(subtracted_frame, biased_column)
+
+    # Destripe
+    for striped_region in striped_regions:
+        subtracted_frame[striped_region[0]:striped_region[1],
+                         striped_region[2]:striped_region[3]] -=]
+                    hf.destriping(subtracted_frame[striped_region[0]:striped_region[1],
+                                                   striped_region[2]:striped_region[3]],
+                                  ref_row=striped_region[4])
+
+    # Remove vertical biases
+    for vertical_bias in vertical_biases:
+        subtracted_frame = (
+            hf.repair_vertical_bias(subtracted_frame, vertical_bias)
+        )
+    # Remove horizontal biases
+    for horizontal_bias in horizontal_biases:
+        subtracted_frame = (
+            hf.repair_horizontal_bias(subtracted_frame, horizontal_bias)
+        )
+
+    # Remove horizontal lines
+    for biased_row in biased_rows:
+        subtracted_frame = (
+            hf.repair_horizontal_line(subtracted_frame, biased_row)
+        )
+
+    return subtracted_frame

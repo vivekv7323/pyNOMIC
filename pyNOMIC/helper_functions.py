@@ -354,26 +354,29 @@ class EmpiricalPSF:
         self.model_ghost = model_ghost
         self.model_bloom = model_bloom
     
-    def __call__(self, xy, *args):
+    def __call__(self, xy, *args, ravel=None):
+
+        if ravel is None:
+            ravel = self.ravel
 
         model = (args[0]*np.mean(modified_airy_disk(xy, self.relative_flux, self.wvl_interp,
                                                     args[2], args[3], 0, args[4], args[5],
-                                    args[6]), axis=0)/np.mean(self.relative_flux) + args[1])        
-        
-        if self.ravel == True:
+                                    args[6]), axis=0)/np.mean(self.relative_flux) + args[1])  
+
+        if ravel == True:
             model = model.ravel()
 
         if self.model_trefoil == True:
             model += center_triangle(xy, *args[7:12], args[5],
-                                        args[6], *args[12:14], ravel=self.ravel)
+                                        args[6], *args[12:14], ravel=ravel)
         if self.model_ghost == True:
             model += angular_gauss(xy, *args[14:18], 
-                                      args[5], args[6], args[18], 0, ravel=self.ravel)
+                                      args[5], args[6], args[18], 0, ravel=ravel)
         if self.model_bloom == True:
             model += (angular_gauss(xy, *args[19:23],
-                                       args[5], args[6], args[23], 0, ravel=self.ravel) +
+                                       args[5], args[6], args[23], 0, ravel=ravel) +
                       angular_gauss(xy, *args[24:28],
-                                       args[5], args[6], args[28], 0, ravel=self.ravel)) 
+                                       args[5], args[6], args[28], 0, ravel=ravel)) 
 
         return model
             
@@ -662,9 +665,6 @@ def psf_removal_mask(center, inner_radius, outer_radius, width, height):
     ----------------------    
     mask: 2D numpy array
     """
-
-    # create grid
-    Y, X = np.ogrid[:width, :height]
 
     # Define pixels on distance from center, normalized with inner and outer radius
     distance = (distance_map(center, width, height) - inner_radius) / outer_radius
@@ -1200,11 +1200,27 @@ def angular_gauss(xy, amp, sigma, sigma2, phase, x0, y0, r0, offset, ravel=True)
     else:
         return model
 
+def Hyperbola2D(xy, amp, sigma, axis_ratio, offset, x0, y0, p, ravel=True):
+    '''
+    2D Hyperbolic function
+    '''
+    x, y = xy
+    
+    model = amp*np.sqrt(1 + sigma*((((x-x0)*np.cos(p) + (y-y0)*np.sin(p)))**2 +
+                                      (((x-x0)*np.sin(p) - (y-y0)*np.cos(p))*axis_ratio)**2) ) + offset
+    
+    if ravel:
+        return model.ravel()
+    else:
+        return model
+
 def seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
-                          model_trefoil=True, use_error=True):
+                          model_trefoil=True, model_ghost=False,
+                          model_bloom=False, use_error=True):
 
     """
-    Fit an empirically derived PSF to an image cutout.
+    Fit an empirically derived PSF to an image cutout with sequential
+    models.
 
     Parameters:
     ----------------------
@@ -1216,6 +1232,9 @@ def seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
         Relative flux for each respective wavelength in wvl_interp.
     model_trefoil (optional): boolean
         Enables the modeling of trefoil in the PSF. Enabled by default.
+    model_ghost (optional): boolean
+        Enables the modeling of the NOMIC PSF ghost.
+        Disabled by default.
     use_error (optional): boolean
         Enables the computation of errors for the cutout based on
         distance from the origin and the standard deviation of the 
@@ -1251,8 +1270,7 @@ def seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
         axis_ratio:
             Ratio of the standard deviations between the
             y-axis and x-axis.
-
-    trifit: 1D numpy array
+            
         Trefoil fit parameters:
         amp:
             Peak amplitude of the central trefoil pattern.
@@ -1278,6 +1296,15 @@ def seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
     wy = np.linspace(0, cutout_shape[0]-1, cutout_shape[0])
     wx, wy = np.meshgrid(wx, wy)
 
+    if model_bloom == True:
+        arr_len = 29
+    elif model_ghost == True:
+        arr_len = 19
+    elif model_trefoil == True:
+        arr_len = 14
+    else:
+        arr_len = 7
+
     if use_error:
         error = distance_map((0.5*cutout_shape[1]-0.5, 0.5*cutout_shape[0]-0.5), cutout_shape[0],
                          cutout_shape[1]).ravel()
@@ -1294,48 +1321,43 @@ def seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
                                       [10*np.max(cutout), 100, 100, np.inf, 2*np.pi,
                                        cutout_shape[0], cutout_shape[1]]))
     except:
-        return np.full(7, np.nan), np.full(4, np.nan), np.full(7, np.nan)
+        return np.full(7, np.nan), np.full(arr_len, np.nan)
         
-    # Create wrapper for modified_airy_disk function, input best fits from the airy_disk function
-    def mod_wrapper(xy, amp, offset, aperture, axis_ratio, ravel=True):
 
-        model = (amp*np.mean(modified_airy_disk(xy, relative_flux, wvl_interp, aperture,
-                                                axis_ratio, 0, reffit[4], reffit[5],
-                                                reffit[6]), axis=0)/np.mean(relative_flux) +
-                 offset)
-        
-        if ravel:
-            return model.ravel()
-        else:
-            return model
+    empirical_psf = EmpiricalPSF(wvl_interp, relative_flux, ravel=True,
+                                 model_trefoil=False,
+                                 model_ghost=False,
+                                 model_bloom=False)  
 
     try:
         # Run curve_fit using the wrapper to get modified airy best fit parameters
-        lbtfit, _ = curve_fit(mod_wrapper, (wx, wy), cutout.ravel(),
-                              p0=[reffit[0], reffit[3], 8, 1],
-                              bounds=([0, 1*-np.inf,6, .5], [10*np.max(cutout), np.inf, 10, 2]))  
+        lbtfit, _ = curve_fit(empirical_psf, (wx, wy), cutout.ravel(),
+                              p0=[reffit[0], reffit[3], 8, 1,
+                                  reffit[4], reffit[5], reffit[6]],
+                              bounds=([0, -np.inf,6, .5, 0,
+                                       reffit[5]-1, reffit[6]-1],
+                                      [10*np.max(cutout), np.inf, 10, 2,
+                                       2*np.pi, reffit[5]+1, reffit[6]+1]))  
     except:
-        lbtfit = np.full(4, np.nan)
+        lbtfit = np.full(7, np.nan)
 
     if model_trefoil:
 
         try:
             # Create wrapper for center_triangle, input best fits from the airy_disk function
-            def tri_wrapper(xy, amp, amp2, sigma, sigma2, phase, r0, r02):
+            def tri_wrapper(xy, amp, amp2, sigma, sigma2, phase, r0, r02, ravel=True):
     
                 return center_triangle(xy, amp, amp2, sigma, sigma2, phase, reffit[5], reffit[6],
-                                       r0, r02)
+                                       r0, r02, ravel=ravel)
 
             # Create PSF model using best fit parameters
             if np.isnan(lbtfit[0]):
                 
-                lbt_model = airy_disk((wx,wy), reffit[0], reffit[1], reffit[2], reffit[3],
-                                      reffit[4], reffit[5], reffit[6], ravel=False)
+                lbt_model = airy_disk((wx,wy), *reffit, ravel=False)
                 
             else:
                 
-                lbt_model = mod_wrapper((wx,wy), lbtfit[0], lbtfit[1], lbtfit[2], lbtfit[3],
-                                        ravel=False)
+                lbt_model = empirical_psf((wx,wy), *lbtfit, ravel=False)
         
             # Calculate model residual
             residual = cutout - lbt_model
@@ -1347,18 +1369,128 @@ def seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
                                           [10*np.max(cutout),10*np.max(cutout),
                                            20, 20, 2*np.pi, 40, 40]),
                                   maxfev=10**5)
+            if model_ghost:
+
+                def ghost_wrapper(xy, *args, ravel=True):
+                    return angular_gauss(xy, *args[:4],
+                                         lbtfit[5], lbtfit[6], args[4], 0, ravel=ravel)
+
+                residual = cutout - tri_wrapper((wx, wy), *trifit, ravel=False)
+
+                # Run curve_fit to get best fit parameters of the ghost from the residual
+                ghostfit, _ = curve_fit(ghost_wrapper, (wx, wy), residual.ravel(),
+                                      p0=[np.max(residual), 7, .45, 0, 28],
+                                      bounds=([0, 1, 0, -1, 5],
+                                              [10*np.max(residual), 15, 1, 1, 50]),
+                                      maxfev=10**5)
+
+                trifit = np.concatenate((trifit, ghostfit))
+
+                if model_bloom:
+    
+                    def bloom_wrapper(xy, *args, ravel=True):
+                        
+                        return (angular_gauss(xy, *args[:4],
+                                              lbtfit[5], lbtfit[6], args[4], 0, ravel=ravel) +
+                                angular_gauss(xy, *args[5:9],
+                                              lbtfit[5], lbtfit[6], args[9], 0, ravel=ravel)) 
+
+                    residual = cutout - ghost_wrapper((wx, wy), *ghostfit, ravel=False)
+    
+                    # Run curve_fit to get best fit parameters of trefoil from the residual
+                    bloomfit, _ = curve_fit(bloom_wrapper, (wx, wy), residual.ravel(),
+                                          p0=[0.4*np.max(residual), 7, .3, 1.57, 32,
+                                              0.4*np.min(residual), 7, .3, 4.5, 32],
+                                          bounds=([0, 1, 0, .8, 5, 10*np.min(residual), 1, 0, 3.4, 5],
+                                                  [10*np.max(residual), 14, .4, 2.4, 50, 0, 14, .7, 5.5, 50]),
+                                          maxfev=10**5)
+    
+                    trifit = np.concatenate((trifit, bloomfit))
             
-            return reffit, lbtfit, trifit
+            return reffit, np.concatenate((lbtfit, trifit))
 
         except:
-            return reffit, lbtfit, np.full(7, np.nan)
+            return reffit, np.concatenate((lbtfit, np.full(arr_len-7, np.nan)))
             
     else:
-        return reffit, lbtfit, np.full(7, np.nan)
+        return reffit, np.concatenate((lbtfit, np.full(arr_len-7, np.nan)))
 
 def joint_empirical_psf_fit(cutout, wvl_interp, relative_flux,
                             model_trefoil=True, model_ghost=True,
                             model_bloom=True, use_error=True):
+
+    """
+    Fit an empirically derived PSF to an image cutout with all
+    parameters all at once, jointly.
+
+    Parameters:
+    ----------------------
+    cutout: 2D numpy array
+        Input image.
+    wvl_interp: 1D numpy array
+        An array of wavelengths. 
+    relative_flux: 1D numpy array
+        Relative flux for each respective wavelength in wvl_interp.
+    model_trefoil (optional): boolean
+        Enables the modeling of trefoil in the PSF. Enabled by default.
+    model_ghost (optional): boolean
+        Enables the modeling of the NOMIC PSF ghost.
+        Disabled by default.
+    use_error (optional): boolean
+        Enables the computation of errors for the cutout based on
+        distance from the origin and the standard deviation of the 
+        cutout.
+
+    Returns:
+    ----------------------    
+    reffit: 1D numpy array
+        Airy disk fitting parameters (floats):
+        amp:
+            Peak amplitude of the airy disk model.
+        sigmax:
+            Standard deviation in the x-axis.
+        sigmay:
+            Standard deviation in the y-axis.
+        offset:
+            Additive offset/intercept.
+        p:
+            Rotation angle.
+        x0:
+            Horizontal coordinate of the origin.
+        y0:
+            Vertical coordinate of the origin.
+
+    lbtfit: 1D numpy array
+        Empirical psf fitting parameters (floats):
+        amp:
+            Peak amplitude of the airy disk model.
+        offset:
+            Additive offset/intercept.
+        aperture:
+            Baseline of the airy disk model in the x-axis.
+        axis_ratio:
+            Ratio of the standard deviations between the
+            y-axis and x-axis.
+            
+        Trefoil fit parameters:
+        amp:
+            Peak amplitude of the central trefoil pattern.
+        amp2:
+            Peak amplitude of the outer trefoil pattern.
+        sigma:
+            Standard deviation of the central trefoil pattern in
+            the radial direction.
+        sigma2:
+            Standard deviation of the radial trefoil pattern in
+            the radial direction.
+        phase:
+            Phase angle of the trefoil pattern.
+        r0:
+            Radial location of the central trefoil pattern.
+        r02:
+            Radial location of the outer trefoil pattern.
+    """
+    
     
     cutout_shape = np.shape(cutout)
 
@@ -1399,7 +1531,8 @@ def joint_empirical_psf_fit(cutout, wvl_interp, relative_flux,
     tri_p0=[]
     tri_low_bound=[]
     tri_up_bound=[]
-            
+
+    # Add together bounds and starting parameters depending on the complexity of the model
     if model_trefoil:
         
         residual = cutout - airy_disk((wx, wy), *reffit, ravel=False)
@@ -1422,23 +1555,49 @@ def joint_empirical_psf_fit(cutout, wvl_interp, relative_flux,
                 tri_low_bound += [0, 1, 0, .8, 5, 10*np.min(residual), 1, 0, 3.4, 5]
                 tri_up_bound += [10*np.max(residual), 14, .4, 2.4, 50, 0, 14, .7, 5.5, 50]
 
+    # Create empirical PSF model
     empirical_psf = EmpiricalPSF(wvl_interp, relative_flux, ravel=True,
                                  model_trefoil=model_trefoil,
                                  model_ghost=model_ghost,
                                  model_bloom=model_bloom)  
     
-    if True:
-        # Run curve_fit to get best fit parameters of trefoil from the residual
+    try:
+        # Run curve_fit to get best fit parameters  from the residual
         lbtfit, _ = curve_fit(empirical_psf, (wx, wy), cutout.ravel(),
                               p0=lbt_p0+tri_p0, bounds=(lbt_low_bound+tri_low_bound,
                                                         lbt_up_bound+tri_up_bound), maxfev=10**5)
         
-    else:
+    except:
         lbtfit = np.full(arr_len, np.nan)
         
     return reffit, lbtfit
 
-def simple_highpass(img, psf_loc, array_shape, highpassrad, fwhm, use_mask=True):
+def simple_highpass(img, psf_loc, array_shape, highpassrad,
+                    fwhm, use_mask=True):
+
+    """
+    Highpass filter an image using a Ring kernel.
+
+    Parameters:
+    ----------------------
+    img: 2D numpy array
+        Input image.
+    psf_loc: tuple
+        Tuple encoding the location of the PSF in the img.
+    array_shape: integer tuple
+        Tuple containing image dimensions, from numpy.shape
+    highpassrad: integer
+        Highpass filter radius in pixels.
+    fwhm: float
+        FWHM of the PSF.
+    use_mask (optional): boolean
+        Enables masking out the PSF. Enabled by default.
+
+    Returns:
+    ----------------------    
+    img: 2D numpy array
+        Filtered image.
+    """
 
     new_bg = np.copy(img)
         
@@ -1554,24 +1713,74 @@ def align_frame(frame, px, py, padding, offset, method="cubic"):
 def grid_alignment(ref, target, px, py, xmin, xmax,
                    xspace, ymin, ymax, yspace, edge_cut=3):
 
+    """
+    Create grid of standard deviations of differences 
+    over a range of translations for chop alignment.
+
+    Parameters:
+    ----------------------
+    ref: 2D numpy array
+        Reference image for alignment.
+    target: 2D numpy array
+        Target image for alignment.
+    px: 1D numpy array
+        Array enumerating columns of the alignment grid
+    py: 1D numpy array
+        Array enumerating rows of the alignment grid
+    xmin: float
+        Minimum X-axis offset.
+    xmax: float
+        Maximum X-axis offset.
+    xspace: integer
+        X dimension of the grid.
+    ymin: float
+        Minimum Y-axis offset.
+    ymax: float
+        Maximum Y-axis offset.
+    yspace: integer
+        Y dimension of the grid.
+    edge_cut (optional): integer
+        Number of pixels to remove at the edges of images
+
+    Returns:
+    ----------------------   
+    x_min: float
+        X-axis location of the grid minimum
+    y_min:
+        Y-axis location of the grid minimum
+    grid_tuple:
+        std_grid: 2D numpy array
+            Grid of standard deviations of differences
+        xlist: 1D numpy array
+            X-axis of the grid
+        ylist: 1D numpy array
+            Y-axis of the grid
+    """
+
     xlist = np.linspace(xmin, xmax, xspace)
     xindices = np.arange(len(xlist))
 
     ylist = np.linspace(ymin, ymax, yspace)
     yindices = np.arange(len(ylist))
 
-    mymap = np.zeros((xspace, yspace))
-    
+    std_grid = np.zeros((xspace, yspace))
+
+    # Unfortunate double loop for doing image alignment
     for i in xindices:
         for j in yindices:
             offset = (xlist[i], ylist[j])
-            bad = convolve_fft(np.nanmedian(ref)*align_frame(target, px, py, (0,0), offset, method="linear")/ref, Gaussian2DKernel(10))
-            bad -= convolve_fft(np.pad(bad[edge_cut:-1*edge_cut, edge_cut:-1*edge_cut], 50+edge_cut, mode='edge'), Ring2DKernel(30, 24))[50:-50, 50:-50]
-            mymap[i, j] = np.std(bad)
+
+            # Use offsets to align the image
+            aligned_img = align_frame(target, px, py, (0,0), offset,
+                                         method="linear")
             
-    loc = np.where(mymap == np.min(mymap))
+            # Read standard deviation of the difference
+            std_grid[i, j] = np.nanstd(aligned_img - ref)
+
+    # Find the minimum of the grid
+    loc = np.where(std_grid == np.min(std_grid))
     
-    return (xlist[loc[0]][0], ylist[loc[1]][0])
+    return xlist[loc[0]][0], ylist[loc[1]][0], (std_grid.T, xlist, ylist)
 
 def calc_para_angles(lbt_lst, lbt_ra, lbt_dec):
     

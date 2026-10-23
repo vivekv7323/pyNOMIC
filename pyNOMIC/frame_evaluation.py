@@ -116,7 +116,8 @@ class EvaluateFrames(object):
             Relative flux for each respective wavelength in wvl_interp.
         model_trefoil: boolean
             Enables the modeling of trefoil in the PSF.
-            Enabled by default.
+        model_ghost: boolean
+            Enables the modeling of the NOMIC ghost in the PSF.
         subtract_psf: boolean
             Enables saving psf subtracted images. Disabled by default.
         psf_subtracted_dir: string
@@ -151,15 +152,15 @@ class EvaluateFrames(object):
         lbtfit: 1D numpy array
             Empirical psf fitting parameters.
         reffit: 1D numpy array
-            Airy disk fitting parameters.
+            Airy disk  fitting parameters.
         image: 2D numpy array
             PSF subtracted image. Is None if PSF subtraction
             is disabled.
         """
         
-        (img_files, chopa_integrated, chopb_integrated, wx, wy, windowsize, array_shape,
-         wvl_interp, relative_flux, model_trefoil, model_ghost, model_bloom,
-         subtract_psf, psf_subtracted_dir) = self.params
+        (img_files, chopa_integrated, chopb_integrated, wx, wy,
+         windowsize, array_shape,  wvl_interp, relative_flux,
+         model_trefoil, model_ghost, subtract_psf, psf_subtracted_dir) = self.params
 
         chop, file = chop_file_tuple
 
@@ -200,63 +201,56 @@ class EvaluateFrames(object):
         # Get the value of the maximum
         psfmaxima = np.nanmax(cutout)
         
-        try:
 
-            # Fit cutout to get empirical psf parameters
-            reffit, lbtfit = hf.joint_empirical_psf_fit(cutout, wvl_interp, relative_flux,
-                                                        model_trefoil=model_trefoil,
-                                                        model_ghost=model_ghost,
-                                                        model_bloom=model_bloom)
+        # Fit cutout to get empirical psf parameters
+        reffit, lbtfit = hf.joint_empirical_psf_fit(cutout, wvl_interp, relative_flux,
+                                                    model_trefoil=model_trefoil,
+                                                    model_ghost=model_ghost,
+                                                    model_bloom=False)
 
-            empirical_psf = hf.EmpiricalPSF(wvl_interp, relative_flux, ravel=False,
-                                         model_trefoil=model_trefoil,
-                                         model_ghost=model_ghost, model_bloom=model_bloom)
-            # Subtract psf_model from cutout
-            residual = cutout - empirical_psf((wx, wy), *lbtfit)
+        empirical_psf = hf.EmpiricalPSF(wvl_interp, relative_flux, ravel=False,
+                                        model_trefoil=model_trefoil,
+                                        model_ghost=model_ghost, model_bloom=False)
+        # Subtract psf_model from cutout
+        residual = cutout - empirical_psf((wx, wy), *lbtfit)
 
-            # To get PSF subtracted, create model with the entire image
-            if subtract_psf:
+        # To get PSF subtracted, create model with the entire image
+        if subtract_psf:
 
-                origin = (int(array_shape[1]/2)-windowsize+lbtfit[5],
-                          int(array_shape[0]/2)-windowsize+lbtfit[6])
+            origin = (int(array_shape[1]/2)-windowsize+lbtfit[5],
+                      int(array_shape[0]/2)-windowsize+lbtfit[6])
 
-                # Create model grid of the entire image
-                nx = np.linspace(0, array_shape[1]-1, array_shape[1])
-                ny = np.linspace(0, array_shape[0]-1, array_shape[0])
-                nx, ny = np.meshgrid(nx, ny)
+            lbtfit[5] = origin[0]
+            lbtfit[6] = origin[1]
 
-                # Subtract psf
-                image = image - empirical_psf((nx, ny), *lbtfit[:5],
-                                              origin[0], origin[1],
-                                              *lbtfit[7:])
+            # Create model grid of the entire image
+            nx = np.linspace(0, array_shape[1]-1, array_shape[1])
+            ny = np.linspace(0, array_shape[0]-1, array_shape[0])
+            nx, ny = np.meshgrid(nx, ny)
 
-                if psf_subtracted_dir is not None:
-                    # Write image to file
-                    newhdul = fits.HDUList([fits.PrimaryHDU(data=(image))])
-                    newhdul.writeto(os.path.join(psf_subtracted_dir,
-                                                 "psfsubtracted_"+file.name), overwrite=True)
-                    newhdul.close()
+            # Subtract psf
+            image = image - empirical_psf((nx, ny), *lbtfit)
 
-                    image = None
+            if psf_subtracted_dir is not None:
+                # Write image to file
+                newhdul = fits.HDUList([fits.PrimaryHDU(data=(image))])
+                newhdul.writeto(os.path.join(psf_subtracted_dir,
+                                             "psfsubtracted_"+file.name), overwrite=True)
+                newhdul.close()
 
-        except:
-
-            image = None
-            
-            return (psfmaxima, background_dev, corr, np.nan, lbtfit,
-                    reffit, image)
-            
+                image = None
+        
         return (psfmaxima, background_dev, corr, np.nanstd(residual), lbtfit,
-                reffit, image)
+                    reffit, image)
 
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
 
 def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp, pxscale=0.0179,
-                     windowsize=20, model_trefoil=True, model_ghost=True, model_bloom=True, subtract_psf=False,
-                     psf_subtracted_dir=None, method="median", buffer_type="frames", integrated_path=None,
-                     tolerance=0.9, memoryMode=1, threadcount=50):
+                     windowsize=20, model_trefoil=True, model_ghost=True, subtract_psf=False,
+                     psf_subtracted_dir=None, method="median", buffer_type="frames", 
+                     integrated_path=None, tolerance=0.9, memoryMode=1, threadcount=50):
 
     """
     Evaluates all the frames, measuring the FWHM, eccentricities,
@@ -282,6 +276,10 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
     windowsize (optional): integer
         Half width/height of the reference cutout image
         (which is 1:1 aspect ratio). Default is 20 pixels.
+    model_trefoil (optional): boolean
+        Enables the modeling of trefoil in the PSF.
+    model_ghost (optional): boolean
+        Enables the modeling of the NOMIC ghost in the PSF.
     subtract_psf (optional): boolean
         Enables saving psf subtracted images. Disabled by default.
     psf_subtracted_dir (optional): string
@@ -365,7 +363,7 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
              residual_dev, lbtfits, reffits, images) =\
              zip(*tqdm(pool.imap(EvaluateFrames((aligned_files, chopa_integrated, chopb_integrated,
                                                  wx, wy, windowsize, array_shape, wvl_interp,
-                                                 relative_flux, model_trefoil, model_ghost, model_bloom,
+                                                 relative_flux, model_trefoil, model_ghost,
                                                  subtract_psf, psf_subtracted_dir)),
                                  np.array((chops, np.arange(len(aligned_files)))).T),
                        total=len(aligned_files), desc="Evaluating frames"))
@@ -414,8 +412,8 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
             (psfmaxima, background_dev, correlations,
              residual_dev, lbtfits, reffits, images) =\
              zip(*tqdm(pool.imap(EvaluateFrames((None, chopa_integrated, chopb_integrated, wx, wy,
-                                                windowsize, array_shape, wvl_interp, relative_flux,
-                                                 model_trefoil, model_ghost, model_bloom,
+                                                 windowsize, array_shape, wvl_interp,
+                                                 relative_flux, model_trefoil, model_ghost, 
                                                  subtract_psf, psf_subtracted_dir)),
                                  np.array((chops, aligned_files)).T), total=len(aligned_files),
                        desc="Evaluating frames"))
@@ -485,25 +483,6 @@ def frame_rejection(chops, params, sigma=None):
 
     return bools
     
-'''
-def fractional_frame_rejection(psfmaxima, background_dev, fwhms, eccentricities, correlations,
-                               amplitudes, offsets,fraction_frames=0.3, start_sigma=5, fev=100):
-
-    sigma = start_sigma+0.1
-    frac_frame_bool = 1
-    count = 0
-
-    while (count < fev):
-        sigma -= 0.1
-        frame_bool = frame_rejection(psfmaxima, background_dev, fwhms, eccentricities,
-                                     correlations, amplitudes, offsets, sigma=sigma)
-        frac_frame_bool = len(frame_bool[frame_bool == False])/len(frame_bool)
-        if (frac_frame_bool >= fraction_frames):
-            return frame_bool, sigma
-        count += 1
-    raise ValueError("Exceeded number of iterations!")
-'''
-
 def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bin=50, prefix='',
                   memoryMode=1, threadcount=50):
 

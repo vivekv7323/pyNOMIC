@@ -27,7 +27,8 @@ class InjectSource(object):
         """
         Parameters (contained inside a tuple):
         ----------------------
-        frames: List of raw file paths or 3D image array
+        frames:
+            List of raw file paths or 3D image array
         directory: string/Path object
             Directory where images will be saved
         wx: 1D numpy array
@@ -68,7 +69,7 @@ class InjectSource(object):
             each file in frames
         para_angles: list or array
             List of parallactic angles corresponding to each file
-            in framesv
+            in frames
         psf_locs (optional): 2 x len(frames) numpy array
             Array containing pixel coordinates of psf locations
             in the input images. If None, the center of the image
@@ -87,9 +88,9 @@ class InjectSource(object):
         # Create source using the airy disk model from the star
         source = hf.airy_disk((wx, wy), contrast*reffit[0], reffit[1], reffit[2], 0, reffit[4],
                               psf_loc[1] + injection_radius*np.cos((injection_angle -
-                                                                     para_angle)*np.pi/180),
+                                                                    para_angle)*np.pi/180),
                               psf_loc[0] + injection_radius*np.sin((injection_angle -
-                                                                     para_angle)*np.pi/180),
+                                                                    para_angle)*np.pi/180),
                               ravel=False)
 
         # Load image, depending on whether frames are in files or memory
@@ -135,7 +136,8 @@ class ForwardModel(object):
         """
         Parameters (contained inside a tuple):
         ----------------------
-        frames: List of file paths or 3D image array
+        frames:
+            List of file paths or 3D image array
         para_angles: list or array
             List of parallactic angles corresponding to each file
             in frames
@@ -170,6 +172,9 @@ class ForwardModel(object):
             calculating source SNR.
         add_info: list
             Additional information to include in error files.
+        nproc: integer
+            Number of threads to use for PCA. Default is None for
+            single-threaded computation.
         """
         
         self.params = params
@@ -280,18 +285,7 @@ class ForwardModel(object):
                                                                            results[1], 3)) 
                                     #print("LR Linregress: ", curr_approx_contrast)
                                 #print("LR Scaling: ", curr_approx_contrast)
-                            '''
-                            plt.figure(1)
-                            plt.scatter(np.asarray(snr_plot), np.asarray(contrast_plot),
-                                        s=10, color="orange")
-                            plt.plot(snr_plot[-2:], np.log(contrast_plot[-2:]))
-                            plt.scatter([5],[curr_approx_contrast],  s=20, color="red")
-                            plt.vlines([5], ymin=1e-4, ymax=8e-4, color="green")
-                            plt.yscale("log")
-                            plt.xlabel("SNR")
-                            plt.ylabel("Contrast")
-                            plt.show()
-                            '''
+
                         else:
                             # If first data point, adjust based on proportion
                             curr_approx_contrast = np.abs((5/curr_snr)*(last_contrast))
@@ -311,12 +305,6 @@ class ForwardModel(object):
                             else:
                                 correlation = True
                                 curr_approx_contrast = 2*last_contrast
-                                '''
-                                if (((snr_plot[-1] > snr_plot[-2]) &
-                                     (contrast_plot[-1] > contrast_plot[-2])) or
-                                    ((snr_plot[-1] < snr_plot[-2]) &
-                                     (contrast_plot[-1] < contrast_plot[-2]))):
-                                '''
                         else:
                              # If SNR is too low, boost contrast by a factor of 2
                             curr_approx_contrast = 2*last_contrast
@@ -366,9 +354,37 @@ class FluxSNR(object):
 
     def __init__(self, params):
 
+        """
+        Parameters (contained inside a tuple):
+        ----------------------
+        image: 2D numpy array
+            Input image.
+        array_shape: integer tuple
+            Tuple containing image dimensions, from numpy.shape
+        origin: integer tuple
+            Tuple containing the origin of the image.
+        aperture_radius: integer
+            Radius of SNR measurement apertures in pixels.
+        """
+
         self.params = params
     
     def __call__(self, coords):
+
+        """
+        Parameters (contained inside coords):
+        ----------------------
+        x: integer
+            X coordinate for SNR measurement.
+        y: integer
+            Position angle at which to inject a source
+        Returns: 
+        ---------------------- 
+        snr: float
+            Computer SNR of the source at the input coordinates.
+        noise_factor: float
+            Computed noise factor.
+        """
 
         image, array_shape, origin, aperture_radius = self.params
 
@@ -391,9 +407,9 @@ class FluxSNR(object):
             
                 mask = hf.circular_mask((origin[0] + source_radius*np.cos(circle_pos[i] +
                                                                           source_angle),
-                                      origin[1] + source_radius*np.sin(circle_pos[i] +
+                                         origin[1] + source_radius*np.sin(circle_pos[i] +
                                                                           source_angle)),
-                                     aperture_radius, array_shape[0], array_shape[1])
+                                         aperture_radius, array_shape[0], array_shape[1])
 
                 fluxes[i] = np.nansum(image[mask])
             
@@ -420,9 +436,10 @@ def inject_source(frames, para_angles, reffits, array_shape,
     """
     Injects a source into a cube of frames.
     
-    Parameters (contained inside a tuple):
+    Parameters:
     ----------------------
-    frames: List of file paths or 3D image array
+    frames:
+        List of file paths or 3D image array
     para_angles: list or array
         List of parallactic angles corresponding to each file
         in frames
@@ -458,7 +475,8 @@ def inject_source(frames, para_angles, reffits, array_shape,
         
     Returns: 
     ---------------------- 
-    injected_files or injected_cube: List of file paths or 3D image array
+    injected_files or injected_cube:
+        List of file paths or 3D image array
     array_shape: integer tuple
         Tuple containing image dimensions, from numpy.shape
     """
@@ -572,7 +590,7 @@ def measure_snr(image_cube, para_angles, aperture_radius, source_radius, source_
     """
     Measures the SNR of a source following Mawet et al. 2014.
     
-    Parameters (contained inside a tuple):
+    Parameters:
     ----------------------
     image_cube: 3D image array
         Cube of frames
@@ -609,13 +627,6 @@ def measure_snr(image_cube, para_angles, aperture_radius, source_radius, source_
     cube_shape = np.shape(image_cube)
     origin = [cube_shape[2]/2 - 0.5, cube_shape[1]/2 - 0.5]
     
-    '''
-    IWA_mask =  hf.circular_mask(origin, aperture_radius, cube_shape[1], cube_shape[2])
-    med_image_unsubtracted = np.nanmedian(image_cube, axis=0)
-    stellar_flux = np.nansum(med_image_unsubtracted[IWA_mask])
-    stellar_peak_flux = np.nanmax(med_image_unsubtracted[IWA_mask])
-    '''
-
     image_cube[np.isnan(image_cube)] = 0
     
     # Do PCA on the relevant annulus
@@ -642,9 +653,9 @@ def measure_snr(image_cube, para_angles, aperture_radius, source_radius, source_
     
         mask = hf.circular_mask((origin[0] + source_radius*np.cos(circle_pos[i] +
                                                                   source_angle*np.pi/180),
-                              origin[1] + source_radius*np.sin(circle_pos[i] +
+                                 origin[1] + source_radius*np.sin(circle_pos[i] +
                                                                   source_angle*np.pi/180)),
-                             aperture_radius, np.shape(med_image)[0], np.shape(med_image)[1])
+                                 aperture_radius, np.shape(med_image)[0], np.shape(med_image)[1])
         if i == 0:
 
             source_peak_flux = (np.nanmax(med_image[mask]))
@@ -668,7 +679,7 @@ def contrast_curve(frames, para_angles, reffits, array_shape, curve_prior,
     """
     Computes a contrast curve for an image sequence.
     
-    Parameters (contained inside a tuple):
+    Parameters:
     ----------------------
     frames: List of file paths or 3D image array
     para_angles: list or array
@@ -758,6 +769,29 @@ def contrast_curve(frames, para_angles, reffits, array_shape, curve_prior,
     return approx_contrasts, snrs
 
 def snr_map(image, aperture_radius=14, threadcount=50):
+
+    """
+    Takes an input image and calculates the SNR for every pixel,
+    creating a SNR map.
+    
+    Parameters:
+    ----------------------
+    image: 2D numpy array
+        Input image.
+    aperture_radius (optional): integer
+        Radius of SNR measurement apertures in pixels.
+        Default is 14 pixels.
+    threadcount (optional): integer
+        Number of threads to employ in multithreading.
+        Default value is 50 threads.        
+
+    Returns: 
+    ---------------------- 
+    snr_map: 2D numpy array
+        Computed SNR map.
+    noise_factor_map: 2D numpy array
+        Computed noise factor map.
+    """
 
     array_shape = np.shape(image)
     snrmap = np.zeros(array_shape)

@@ -101,10 +101,7 @@ class FileInfo(object):
          frame_median_limit, cold_stop_crop, correct_linearity) = self.params
 
         hdul = fits.open(file)
-        orig = hdul[0].data
-
-        if orig.ndim == 3:
-            orig = orig[0]
+        orig = hdul[0].data[0]
 
         if correct_linearity is not None:
             orig = correct_linearity(orig)
@@ -259,7 +256,10 @@ class HighPass(object):
 
         hdul = fits.open(file)
 
-        orig = hdul[0].data[0]
+        orig = hdul[0].data
+
+        if orig.ndim == 3:
+            orig = orig[0]
 
         # If flat is available, create flat divided image
         if tempflat is not None:
@@ -402,6 +402,18 @@ class FourierMean(object):
     '''
 
     def __init__(self, params):
+
+        """
+        Parameters:
+        ----------------------
+        files: 1D numpy array
+            List of raw file paths, sorted.
+        sigma: float
+            Standard deviation based threshold to discard the
+            low frequency end of the Fourier transform of the image.
+        cutout: list
+            List of slicing indices to crop the image.
+        """
 
         self.params = params
 
@@ -746,12 +758,13 @@ def highpass(files, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None,
     with Pool(threadcount) as pool:
         results = (zip(*tqdm(pool.imap(HighPass((highpass_dir, bools, highpassmask,
                                                  tempflat, smooth, binsize)), files),
-                      total=len(files), desc="Creating high pass filtered frames"))
+                             total=len(files), desc="Creating high pass filtered frames"))
         )
 
     return highpass_dir
     
-def stellar_chop_identification(files, highpass_dir, nbg=5, chop_direction = 'UP-DOWN'):
+def stellar_chop_identification(files, highpass_dir, nbg=5,
+                                chop_direction = 'UP-DOWN', use_roll_bg=False):
     
     """
     Measures the chop states of each file by examining the highpass
@@ -769,6 +782,8 @@ def stellar_chop_identification(files, highpass_dir, nbg=5, chop_direction = 'UP
     chop_direction (optional): string
         The chopping direction employed, either "UP-DOWN", "LEFT-RIGHT".
         Default value is "UP-DOWN", used for single-sided imaging.
+    use_roll_bg (optional): boolean
+        Enables rolling background subtraction. Disabled by default.
         
     Returns:
     ----------------------
@@ -794,14 +809,15 @@ def stellar_chop_identification(files, highpass_dir, nbg=5, chop_direction = 'UP
     array_shape = np.shape(hdul[0].data)
     hdul.close()
 
-    # Create array for storing background frames
-    frames = np.ones((nbg, hp_array_shape[0], hp_array_shape[1]))
+    if use_roll_bg:
+        # Create array for storing background frames
+        frames = np.ones((nbg, hp_array_shape[0], hp_array_shape[1]))
 
-    # Fill array with first nbg images
-    for j in range(nbg):
-        hdul = fits.open(os.path.join(highpass_dir, "highpass_"+files[j].name))
-        frames[j] = hdul[0].data
-        hdul.close()
+        # Fill array with first nbg images
+        for j in range(nbg):
+            hdul = fits.open(os.path.join(highpass_dir, "highpass_"+files[j].name))
+            frames[j] = hdul[0].data
+            hdul.close()
 
     # Initialize variables
     chops = np.array(["CHOP_A"]*len(files))
@@ -813,16 +829,20 @@ def stellar_chop_identification(files, highpass_dir, nbg=5, chop_direction = 'UP
     # Rolling background subtraction
     for i in tqdm(range(len(files))):
 
-        # Update array with new frame
-        if (i > int(np.floor(nbg/2))) and (i < (len(files) - int(np.floor(nbg/2)))):
-            hdul = fits.open(os.path.join(highpass_dir,
-                                          "highpass_"+files[nbg+i - int(np.floor(nbg/2)) -1].name))
-            frames = np.concatenate((frames[1:], [hdul[0].data]))
-            hdul.close()
+        if use_roll_bg:
+            # Update array with new frame
+            if (i > int(np.floor(nbg/2))) and (i < (len(files) - int(np.floor(nbg/2)))):
+                hdul = fits.open(os.path.join(highpass_dir,
+                                              "highpass_"+files[(nbg+i -
+                                                                 int(np.floor(nbg/2)) -1)].name))
+                frames = np.concatenate((frames[1:], [hdul[0].data]))
+                hdul.close()
 
-        # Calculate new background by taking the minimum of the frames if chop state hasn't frozen
-        if not freezeChop:
-            bg =  np.min(frames, axis=0)
+            # Calculate new background by taking the min of frames if chop state is not frozen
+            if not freezeChop:
+                bg =  np.min(frames, axis=0)
+        else:
+            bg = 0
 
         # Open image
         image = fits.open(os.path.join(highpass_dir, "highpass_"+files[i].name))
@@ -929,9 +949,12 @@ def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
     size (optional): integer
         Parameter for scipy.ndimage.maximum_filter1d, length along
         which to calculate the 1-D maximum.
+    cutout (optional): list
+        List of slicing indices to crop the image.
     threadcount (optional): integer
         Number of threads to employ in multithreading.
         Default value is 50 threads.
+        
     Returns:
     ----------------------
     chops: 1D numpy array
