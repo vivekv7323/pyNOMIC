@@ -4,7 +4,8 @@
 import os, psutil
 import numpy as np
 from tqdm.auto import tqdm
-from multiprocessing.pool import ThreadPool as Pool
+from multiprocessing.pool import ThreadPool
+from multiprocessing import Pool
 
 from astropy.io import fits
 from astropy.table import QTable
@@ -384,7 +385,8 @@ class EmpiricalPSF:
 # FUNCTIONS
 #----------------------------------------
 
-def integrate_files_buffer(files, tolerance=0.9, threadcount=50):
+def integrate_files_buffer(files, tolerance=0.9,
+                           parallel_func="threads", threadcount=50):
 
     """
     Parameters (contained inside a tuple):
@@ -394,8 +396,12 @@ def integrate_files_buffer(files, tolerance=0.9, threadcount=50):
     tolerance (optional): float
         Fraction of available memory to be used for integration.
         Default value is 0.9.
+    parallel_func (optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing 
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads to employ in parallelization.
         Default value is 50 threads.
 
     Returns:
@@ -428,8 +434,15 @@ def integrate_files_buffer(files, tolerance=0.9, threadcount=50):
     splitlist = np.linspace(0, len(files), 1+buffer)[1:-1].round().astype(int)
     filebufs = np.split(files, splitlist)
 
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
+
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         bigarr, filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)),
                                                      filebufs),
                                            desc="integrating files", total=len(filebufs)))
@@ -439,7 +452,8 @@ def integrate_files_buffer(files, tolerance=0.9, threadcount=50):
 
     return mean_frame
 
-def integrate_frames_buffer(files, method="median", tolerance=0.9, threadcount=50):
+def integrate_frames_buffer(files, method="median", tolerance=0.9,
+                            parallel_func="threads", threadcount=50):
 
     """
     Integrates a sequence of frames by dividing the frames themselves into
@@ -455,8 +469,12 @@ def integrate_frames_buffer(files, method="median", tolerance=0.9, threadcount=5
     tolerance (optional): float
         Fraction of available memory to be used for integration.
         Default value is 0.9.
+    parallel_func (optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing 
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads to employ in parallelization.
         Default value is 50 threads.
 
     Returns:
@@ -484,9 +502,16 @@ def integrate_frames_buffer(files, method="median", tolerance=0.9, threadcount=5
 
     # Create indices to divide the image
     indices = np.linspace(0, array_shape[0], chunks+1).astype(np.int16)
-
+    
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
+    
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
          frame_fragments,_ = zip(*tqdm(pool.imap(FrameBufferIntegration((files, indices,
                                                                           array_shape, method)),
                                range(chunks)), desc="integrating files", total=chunks))
@@ -535,7 +560,8 @@ def channel_stats(image):
     # Compute median and standard deviation
     return np.nanmedian(channels, axis=1), np.nanstd(channels, axis=1)
 
-def get_raw_psf_maxima(files, original_psf_locs, edge_cut=2, windowsize=3):
+def get_raw_psf_maxima(files, original_psf_locs, edge_cut=2,
+                       windowsize=3, parallel_func="threads", threadcount=50):
 
     """
     Get PSF maxima from raw images using PSF locations.
@@ -544,28 +570,39 @@ def get_raw_psf_maxima(files, original_psf_locs, edge_cut=2, windowsize=3):
     ----------------------
     files: list or array 
         List of raw file paths, sorted 
-        
     original_psf_locs: 2 x len(files) numpy array
         Array containing pixel coordinates of
         psf locations in the input images  
-            
     edge_cut: integer
         Number of pixels that were removed
         at the edges of the images used to
         extract PSF locations.
-
     windowsize: integer
         Half width/height of the reference cutout image
         (which is 1:1 aspect ratio)
+    parallel_func (optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing 
+    threadcount (optional): integer
+        Number of threads to employ in parallelization.
+        Default value is 50 threads.
 
     Returns:
     ----------------------
     maxima: 1D numpy array
         Raw PSF maxima.
     """
+
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         raw_psf_maxima = (zip(*tqdm(pool.imap(RawPSFMaxima((files,
                                                             original_psf_locs,
                                                             edge_cut,

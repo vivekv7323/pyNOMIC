@@ -4,7 +4,8 @@
 import os, pathlib
 import numpy as np
 from tqdm.auto import tqdm
-from multiprocessing.pool import ThreadPool as Pool
+from multiprocessing.pool import ThreadPool
+from multiprocessing import Pool
 
 from astropy.io import fits
 from astropy.convolution import (convolve_fft, Box2DKernel,
@@ -408,7 +409,7 @@ class PSFSubRedux(object):
 
                 # Remove residual
                 final = ((img - psf_model)*(1-psfrem) +
-                         (img - psf_model - residual_bg + grad)*psfrem
+                         (img - psf_model - residual_bg + grad)*psfrem)
                          
             elif residual_handling == "replace":
 
@@ -1175,7 +1176,7 @@ def create_stacked_flat(files, chops, chop_direction="UP-DOWN", method="median",
         Fraction of available memory to be used for integration.
         Default value is 0.9.
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads/processors to employ in multithreading.
         Default value is 50 threads.
     
     Returns: 
@@ -1312,7 +1313,8 @@ def create_star_mask(chopa_star_img, chopb_star_img, chopa_flat, chopb_flat,
 def subtract_psfs(files, chops, stellar_temp,
                   maxima=None, badmap=None, starmask=None, flats=None, windowsize=35,
                   nbg=1, smooth=5, recur_iteration=2, remove_trefoil=True,
-                  residual_handling="remove", fit_reject_criterion=100, prefix='', threadcount=50):
+                  residual_handling="remove", fit_reject_criterion=100, prefix='',
+                  parallel_mode="threads", threadcount=50):
 
     """
     Subtracts the stellar PSF from every image.
@@ -1357,8 +1359,12 @@ def subtract_psfs(files, chops, stellar_temp,
         Maximum allowed failcode, used in replacing failed psf fits.
     prefix (optional): string
         Prefix to add to directory name when saving image.
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads/processors to employ in parallelization.
         Default value is 50 threads.
 
     Returns: 
@@ -1385,8 +1391,15 @@ def subtract_psfs(files, chops, stellar_temp,
 
     wvl_interp, relative_flux = hf.calculate_expected_flux(stellar_temp)
 
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
+
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
 
         (max_x,
          max_y,
@@ -1409,7 +1422,7 @@ def subtract_psfs(files, chops, stellar_temp,
 
     if len(failed_indices) > 0:
         #if __name__ == "__main__":
-        with Pool(threadcount) as pool:
+        with parallel_d(threadcount) as pool:
     
             (new_max_x,
              new_max_y) = zip(*tqdm(pool.imap(PSFSubRedux((psf_subtracted_dir, files,
@@ -1431,7 +1444,8 @@ def subtract_psfs(files, chops, stellar_temp,
 
     return psf_subtracted_files, maxima, failcodes, reffits, lbtfits
 
-def parallelized_chop_subtraction(files, chops, prefix='', threadcount=50):
+def parallelized_chop_subtraction(files, chops, prefix='',
+                                  parallel_mode="threads", threadcount=50):
 
     """
     Parallelization of pyNOMIC.helper_functions.chop_subtraction
@@ -1446,8 +1460,12 @@ def parallelized_chop_subtraction(files, chops, prefix='', threadcount=50):
         entries are either "CHOP_A" or "CHOP_B"
     prefix (optional): string
         Prefix to add to directory name when saving image.
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads/processors to employ in parallelization.
         Default value is 50 threads.
 
     Returns:
@@ -1463,8 +1481,15 @@ def parallelized_chop_subtraction(files, chops, prefix='', threadcount=50):
     if not os.path.exists(chop_subtracted_dir):
         os.makedirs(chop_subtracted_dir)
 
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
+
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         offset_x, offset_y = zip(*tqdm(pool.imap(ChopSubtract((files, chops, chop_subtracted_dir)),
                                                  range(len(files))), total=len(files),
                                        desc = "Chop subtracting frames..."))
@@ -1481,7 +1506,7 @@ def chop_align(files, chops, maxima=None, offsets=None, channel_edges=[127, 255,
                horizontal_biases=[], interp_method="linear", registration_method="Grid", 
                ref_index=None,  nbg=1, smooth=9, edge_cut=3, search_rad=16, iterations=2,
                nan_mask_radius=56, create_residual=True, save_file=False,  prefix='',
-               threadcount=50):
+               parallel_mode = "processors", threadcount=os.cpu_count()):
     
     """
     Aligns the chop residual background of PSF subtracted files.
@@ -1549,9 +1574,13 @@ def chop_align(files, chops, maxima=None, offsets=None, channel_edges=[127, 255,
         component frames. Enabled by default.
     prefix (optional): string
         Prefix to add to directory name when saving image.
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading,
+        "processors" specifies multiprocessing (default)
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
-        Default value is 50 threads.
+        Number of threads/processors to employ in parallelization.
+        Default value is the logical CPU count.
 
     Returns:
     ----------------------    
@@ -1603,7 +1632,7 @@ def chop_align(files, chops, maxima=None, offsets=None, channel_edges=[127, 255,
         # Chop subtract reference
         reference = subtract_detector(reference, ref_index, chops[ref_index], files,
                                       channel_edges=channel_edges, striped_regions=striped_regions,
-                                      biased_columns=biased_columns, biased_rows=biased_rows
+                                      biased_columns=biased_columns, biased_rows=biased_rows,
                                       vertical_biases=vertical_biases,
                                       horizontal_biases=horizontal_biases)
         
@@ -1633,10 +1662,16 @@ def chop_align(files, chops, maxima=None, offsets=None, channel_edges=[127, 255,
     
         reference[hf.circular_mask(np.flip(np.nanmean(maxima[bg_indices], axis=0)),
                                    nan_mask_radius, frameh, framew)] = np.nan
-         
+
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         (offset_x,
          offset_y,
          prefit_offset_x,
@@ -1673,8 +1708,8 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
                         biased_columns=[303], biased_rows = [], striped_regions=[],
                         vertical_biases=[], horizontal_biases=[], nanrows=[], nancols=[],
                         flats=None, resflats=None, flat_offsets=None,
-                        correction_method="division", channel_method="linear",
-                        nbg=1, smooth=5, edge_cut = 2, prefix="", threadcount=50):
+                        correction_method="division", channel_method="linear", nbg=1, smooth=5,
+                        edge_cut=2, prefix="", parallel_mode="threads", threadcount=50):
     
     """
     Subtract background from adjacent chop frames, divide by flat,
@@ -1733,8 +1768,12 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
         Number of pixels to remove at the edges of images
     prefix (optional): string
         Prefix to add to directory name when saving image.
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads/processors to employ in parallelization.
         Default value is 50 threads.
 
     Returns:
@@ -1750,8 +1789,15 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
     if not os.path.exists(subtracted_dir):
         os.makedirs(subtracted_dir)
         
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
+        
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         (chopsub_stds,
          backsub_stds) = zip(*tqdm(pool.imap(SubtractBackground((subtracted_dir, raw_files,
                                                                  psf_subtracted_files, chops,
@@ -1770,7 +1816,8 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
 def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask=None,
                        alignment_method="fitting", interp_method="cubic", windowsize=20,
                        stellar_temp=5778, actmax=False, model_trefoil=True, boxcar=False,
-                       save_files=True, prefix='', threadcount=50):
+                       save_files=True, prefix='', parallel_func="processors",
+                       threadcount=os.cpu_count()):
 
     """
     Aligns all frames together, centering the PSF in the middle
@@ -1816,9 +1863,13 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
         Enables saving the aligned files, True by default.
     prefix (optional): string
         Prefix to add to directory name when saving image.
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading,
+        "processors" specifies multiprocessing (default)
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
-        Default value is 50 threads.
+        Number of threads/processors to employ in parallelization.
+        Default value is the logical CPU count.
         
     Returns:
     ----------------------    
@@ -2013,9 +2064,16 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
         newhdul.writeto(os.path.join(aligned_dir, "aligned_"+files[1].name), overwrite=True)
         newhdul.close()
 
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
+
     # Align the rest of the images
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         offsets, imgfits = zip(*tqdm(pool.imap(RegisterFrames((files, subtracted_dir, aligned_dir,
                                                                badmap, starmask, padding,
                                                                center_padding, px, py, wx, wy,
@@ -2057,7 +2115,9 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
     return (original_psf_locs, imgfits, np.shape(first_frame),
             float(first_frame.nbytes), aligned_files)
 
-def mask_files(files, directory, locs, array_shape, nbg=1, nan_mask_radius=16, threadcount=50):
+def mask_files(files, directory, locs, array_shape, nbg=1,
+               nan_mask_radius=16, parallel_mode="threads",
+               threadcount=50):
     
     """
     Mask out circular regions of the image at certain locations.
@@ -2077,8 +2137,12 @@ def mask_files(files, directory, locs, array_shape, nbg=1, nan_mask_radius=16, t
         oversubtracted psf
     nan_mask_radius (optional): integer
         Radius of the nan mask
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads/processors to employ in parallelization.
         Default value is 50 threads.
         
     Returns:
@@ -2089,9 +2153,16 @@ def mask_files(files, directory, locs, array_shape, nbg=1, nan_mask_radius=16, t
 
     if not os.path.exists(directory):
         os.makedirs(directory)
+        
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         results = zip(*tqdm(pool.imap(hf.MaskFrames((files, directory, locs, array_shape,
                                                      nbg, nan_mask_radius)),
                                       range(len(files))), total=len(files),
@@ -2161,10 +2232,10 @@ def subtract_detector(img, index, chop, files, channel_edges=[127, 255, 383],
     # Destripe
     for striped_region in striped_regions:
         subtracted_frame[striped_region[0]:striped_region[1],
-                         striped_region[2]:striped_region[3]] -=]
+                         striped_region[2]:striped_region[3]] -= (
                     hf.destriping(subtracted_frame[striped_region[0]:striped_region[1],
                                                    striped_region[2]:striped_region[3]],
-                                  ref_row=striped_region[4])
+                                  ref_row=striped_region[4]))
 
     # Remove vertical biases
     for vertical_bias in vertical_biases:

@@ -5,7 +5,8 @@ import os, pathlib
 import numpy as np
 from itertools import groupby
 from tqdm.auto import tqdm
-from multiprocessing.pool import ThreadPool as Pool
+from multiprocessing.pool import ThreadPool
+from multiprocessing import Pool
 
 from astropy.io import fits
 from astropy.time import Time
@@ -544,7 +545,8 @@ def create_badmap(files, sigma=1, smooth=30, edge_cut=3, growth=1,
 
 def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = None,
                skip_target_check=False, recalc_para_angles=False, correct_linearity=True,
-               frame_median_limit = 28000, cold_stop_crop=0, ncoadds=2, threadcount=50):
+               frame_median_limit = 28000, cold_stop_crop=0, ncoadds=2,
+               parallel_func="threads", threadcount=50):
     """
     Sets up data by reading parameters from the fits headers and
     creating high pass frames for chop identification. For double sided
@@ -577,8 +579,12 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
         the case of double-sided imaging.
     ncoadds (optional): integer
         Number of coadded frames in each image.
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads to employ in parallelization.
         Default value is 50 threads.
         
     Returns:
@@ -643,9 +649,16 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
             new_raw_dirs = [lincorr_raw_dir]
     else:
         corrector = None
+        
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         
         (chops, frame_medians, para_angles,
          end_times, temps, airmasses,
@@ -689,7 +702,8 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
     return files, chops, header_info
 
 def highpass(files, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None,
-             use_temp_flat=True, smooth=30, binsize=10, threadcount=50):
+             use_temp_flat=True, smooth=30, binsize=10, parallel_func="threads",
+             threadcount=50):
     """
     Sets up data by reading parameters from the fits headers and
     creating high pass frames for chop identification. For double sided
@@ -712,8 +726,12 @@ def highpass(files, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None,
         Outer radius of the star mask
     binsize (optional): integer
         Number of pixels for spatial binning.
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads to employ in parallelization.
         Default value is 50 threads.
         
     Returns:
@@ -753,9 +771,16 @@ def highpass(files, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None,
     
     if not os.path.exists(highpass_dir):
         os.makedirs(highpass_dir)
+
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         results = (zip(*tqdm(pool.imap(HighPass((highpass_dir, bools, highpassmask,
                                                  tempflat, smooth, binsize)), files),
                              total=len(files), desc="Creating high pass filtered frames"))
@@ -930,7 +955,8 @@ def frame_med_chop_identification(orig_frame_medians, files=None,
     return chops, frame_medians, chopm
 
 def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
-                                size=3, cutout=[], threadcount=50):
+                                size=3, cutout=[], parallel_func="threads",
+                                threadcount=50):
     
     """
     Measures the chop states of each file by using the Fourier transform
@@ -951,8 +977,12 @@ def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
         which to calculate the 1-D maximum.
     cutout (optional): list
         List of slicing indices to crop the image.
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads to employ in parallelization.
         Default value is 50 threads.
         
     Returns:
@@ -965,9 +995,16 @@ def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
     chopm: 1D numpy array
         List of normalized frame medians corresponding to the file list.
     """
+    
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         measures, indices =\
             zip(*tqdm(pool.imap(FourierMean((files, sigma, cutout)),
                                 range(len(files))),
@@ -1107,7 +1144,8 @@ def chop_correction(orig_files, orig_chops, orig_header_info,
     return files[bools], chops[bools], header_info[:,bools], maxima
 
 def chop_finder(orig_files, orig_para_angles, directory, metrics=["locdiff"],
-                chop_direction = 'UP-DOWN', coadd_limit = 10, threadcount=50):
+                chop_direction = 'UP-DOWN', coadd_limit = 10,
+                parallel_func="threads", threadcount=50):
 
     """
     Measures the chop states of each file by examining input frames and
@@ -1140,8 +1178,12 @@ def chop_finder(orig_files, orig_para_angles, directory, metrics=["locdiff"],
         Default value is "UP-DOWN", used for single-sided imaging.
     coadd_limit (optional): integer
         Maximum number of frames that can be coadded. Default is 10.
+     parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading (default),
+        "processors" specifies multiprocessing
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
+        Number of threads to employ in parallelization.
         Default value is 50 threads.
         
     Returns:
@@ -1192,9 +1234,16 @@ def chop_finder(orig_files, orig_para_angles, directory, metrics=["locdiff"],
     chop_guesses, chopstate_derived = (np.zeros((len(files)), dtype='<U6'), 
                                        np.zeros((len(files)), dtype='<U6'))
     maxima = np.zeros(((len(files)-1), 2))
+
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with parallel_func(threadcount) as pool:
         minmax, stdev, bgmean, locdiff, maxima, chop_guesses, indices =\
             zip(*tqdm(pool.imap(ChopMetrics((files, directory, array_shape, chop_direction)),
                                 range(len(files)-1)),

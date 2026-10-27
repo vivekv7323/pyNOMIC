@@ -4,8 +4,8 @@
 import os, pathlib
 import numpy as np
 from tqdm.auto import tqdm
-from multiprocessing.pool import ThreadPool as Pool
-
+from multiprocessing.pool import ThreadPool
+from multiprocessing import Pool
 from astropy.io import fits
 
 from scipy.signal import correlate
@@ -250,7 +250,8 @@ class EvaluateFrames(object):
 def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp, pxscale=0.0179,
                      windowsize=20, model_trefoil=True, model_ghost=True, subtract_psf=False,
                      psf_subtracted_dir=None, method="median", buffer_type="frames", 
-                     integrated_path=None, tolerance=0.9, memoryMode=1, threadcount=50):
+                     integrated_path=None, tolerance=0.9, memoryMode=1, parallel_func="processors",
+                     threadcount=os.cpu_count()):
 
     """
     Evaluates all the frames, measuring the FWHM, eccentricities,
@@ -297,9 +298,13 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
         If set to 0, frames are retrieved from aligned_files as an
         image cube (from memory). If set to 1, frames are opened from
         aligned_files as a list of files. Default is 1.
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading,
+        "processors" specifies multiprocessing (default)
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
-        Default value is 50 threads.
+        Number of threads to employ in parallelization.
+        Default value is the logical CPU count.
 
     Returns:
     ----------------------     
@@ -333,6 +338,13 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
 
     wvl_interp, relative_flux = hf.calculate_expected_flux(stellar_temp)
 
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
+
     # Files are in memory
     if memoryMode == 0:
 
@@ -358,7 +370,7 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
             chopb_integrated = stacks["arr_1"]
             
         #if __name__ == "__main__":
-        with Pool(threadcount) as pool:
+        with parallel_func(threadcount) as pool:
             (psfmaxima, background_dev, correlations,
              residual_dev, lbtfits, reffits, images) =\
              zip(*tqdm(pool.imap(EvaluateFrames((aligned_files, chopa_integrated, chopb_integrated,
@@ -408,7 +420,7 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
             chopb_integrated = stacks["arr_1"]
 
         #if __name__ == "__main__":
-        with Pool(threadcount) as pool:
+        with parallel_func(threadcount) as pool:
             (psfmaxima, background_dev, correlations,
              residual_dev, lbtfits, reffits, images) =\
              zip(*tqdm(pool.imap(EvaluateFrames((None, chopa_integrated, chopb_integrated, wx, wy,
@@ -484,7 +496,7 @@ def frame_rejection(chops, params, sigma=None):
     return bools
     
 def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bin=50, prefix='',
-                  memoryMode=1, threadcount=50):
+                  memoryMode=1, parallel_func="processors", threadcount=os.cpu_count()):
 
     """
     Bin frames temporally, and update chop states and parallactic angle.
@@ -513,9 +525,13 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
         If set to 0, frames are returned to memory.
         If set to 1, frames are saved to files.
         Default is 1.
+    parallel_func(optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading,
+        "processors" specifies multiprocessing (default)
     threadcount (optional): integer
-        Number of threads to employ in multithreading.
-        Default value is 50 threads.
+        Number of threads to employ in parallelization.
+        Default value is the logical CPU count.
         
     Returns: 
     ---------------------- 
@@ -564,6 +580,13 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
     # Create arrays
     binned_chops = np.empty(numbinfiles, dtype="<U16")
     binned_angles = np.zeros(numbinfiles)
+
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+    else:
+        raise ValueError("Invalid parallelization method")
 
     # Return frames in memory
     if memoryMode == 0:

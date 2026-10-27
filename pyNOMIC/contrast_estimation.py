@@ -7,7 +7,6 @@ from tqdm.auto import tqdm
 from astropy.io import fits
 from astropy.convolution import convolve_fft, Ring2DKernel
 from scipy.stats import linregress
-from multiprocessing.pool import ThreadPool as Pool
 from vip_hci.psfsub.utils_pca import pca_annulus
 from vip_hci.psfsub.pca_local import pca_annular
 import pyNOMIC.helper_functions as hf
@@ -814,3 +813,136 @@ def snr_map(image, aperture_radius=14, threadcount=50):
 
     return (np.asarray(snrs).reshape(np.shape(image)), 
             np.asarray(noise_factors).reshape(np.shape(image)))
+
+def contrast_curve(frames, para_angles, reffits, array_shape, curve_prior,
+                   injection_radii, injection_angles, aperture_radius,
+                   ncomp=5, delta_rot=0, n_segments=1, highpassrad=None,
+                   tolerance=0.05, high_buffer=2, max_iterations=10, 
+                   add_info=[None, None], nproc=1):
+    """
+    Computes a contrast curve for an image sequence.
+    
+    Parameters (contained inside a tuple):
+    ----------------------
+    frames: List of file paths or 3D image array
+    para_angles: list or array
+        List of parallactic angles corresponding to each file
+        in frames
+    reffits: 1D numpy array
+        Array of airy disk fitting parameters corresponding to
+        each file in frames
+    array_shape: integer tuple
+        Tuple containing image dimensions, from numpy.shape
+    curve_prior: 1D numpy array
+        A contrast curve used as a starting assumption for performing
+        SNR measurements.
+    injection_radii: 1D numpy array
+        Radii from the stellar psf in which to inject sources.
+    injection_angles: 1D numpy array
+        Position angles at which to inject sources.
+    aperture_radius: integer
+        Radius of SNR measurement apertures in pixels.
+    ncomp (optional): integer
+        Number of KLIP components.
+    delta_rot (optional): float
+        Excludes images with angles within delta_rot from
+        the PSF library for each image. Default is 0, which allows
+        for the PSF library to be only computed once.
+    n_segments (optional): integer
+        Number of segments in each annulus for PCA.
+    highpassrad (optional): integer
+        Highpass filter radius. None by default, disabling highpass
+        filtering.
+    tolerance (optional): float
+        Allowable tolerance for computing the SNR as a percent.
+    high_buffer (optional): float
+        Multiplicative factor applied to curve_prior to ensure that
+        modelling starts with a high SNR source.
+    max_iterations (optional): integer
+        Maximum number of iterations allowed when recursively
+        calculating source SNR.
+    add_info (optional): list
+        Additional information to include in error files.
+    nproc (optional): integer
+        Number of processors to employ in vip_hci pca implementations.
+    threadcount (optional): integer
+        Number of threads to employ in multithreading.
+        Default value is 6 threads.        
+        
+    Returns: 
+    ---------------------- 
+    approx_contrasts:
+    len(injection_radii) x len(injection_angles) 2D numpy array
+        Measured contrasts at each injection radius and angle
+    snrs:
+    len(injection_radii) x len(injection_angles) 2D numpy array
+        Associated SNRs with each contrast in approx_contrasts.
+    """
+    
+    # Stack angles and injection radii
+    coordlist = np.vstack(np.asarray(np.meshgrid(injection_radii, injection_angles)).T)
+
+
+    (snrs_list,
+     approx_contrast_list) = (np.zeros((len(injection_radii)*len(injection_angles))),
+                              np.zeros((len(injection_radii)*len(injection_angles))))
+
+    contrast_gen = ForwardModel((frames, para_angles, reffits, array_shape, curve_prior,
+                                 aperture_radius, ncomp, delta_rot, n_segments, highpassrad,
+                                 tolerance, high_buffer, max_iterations, add_info, nproc))
+
+    for i in (range(len(coordlist))):
+        
+        approx_contrast_list[i], snrs_list[i] = contrast_gen(coordlist[i])
+
+    approx_contrasts = np.asarray(approx_contrast_list).reshape(len(injection_radii),
+                                                                len(injection_angles))
+    snrs = np.asarray(snrs_list).reshape(len(injection_radii), len(injection_angles))
+
+    return approx_contrasts, snrs
+
+def curve_prior(r):
+    return 0.1*np.exp(-0.1*r) + 1e-4
+
+class RunCurves(object):
+
+    def __init__(self, params):
+
+        self.params = params
+
+    def __call__(self, coords):
+
+        (binned_frames, binned_chops, binned_angles, binned_reffits,
+         array_shape, injection_radii,
+         injection_angles, hwhm, chop_state, directory, threadcount) = self.params
+
+        delta_rot, ncomp, highpassrad = coords
+
+        #print(prefix+"_ncomp-"+str(ncomp)+"_highpass-"+str(highpassrad))
+        
+        if highpassrad == 0:
+            hp = None
+        else:
+            hp = highpassrad
+
+
+        approx_contrasts, snrs = contrast_curve(binned_frames[(binned_chops == chop_state)&(binned_angles > -11)],
+                                                binned_angles[(binned_chops == chop_state)&(binned_angles > -11)],
+                                                binned_reffits[(binned_chops == chop_state)&(binned_angles > -11)],
+                                                array_shape, curve_prior,
+                                                injection_radii, injection_angles, aperture_radius=int(hwhm),
+                                                ncomp=ncomp, delta_rot=delta_rot/100, n_segments=1, highpassrad=hp,
+                                                tolerance=0.05, high_buffer=2, max_iterations=10, 
+                                                add_info=[None, None], nproc=1, threadcount=threadcount)
+                
+        upper_error = np.nanmedian(approx_contrasts*np.abs(5/snrs - 1), axis=1)
+        error = (np.sqrt(np.std(approx_contrasts, axis=1)** 2 + upper_error**2))
+        meaned_contrasts = np.nanmedian(approx_contrasts, axis=1)
+
+        np.savez(os.path.join(directory,
+                              ("Reduction"+"Injection radius-"+str(injection_radii[0])+
+                               "_deltarot-"+str(delta_rot)+"_ncomp-"+str(ncomp)+
+                               "_highpass-"+str(highpassrad)+".npz")),
+                 approx_contrasts, snrs, error, meaned_contrasts, injection_radii, injection_angles)
+
+        return True, True
