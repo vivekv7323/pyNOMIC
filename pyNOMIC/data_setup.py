@@ -201,6 +201,8 @@ class FileInfo(object):
                                 overwrite=True)
                 newhdul.close()
 
+            del hdul.data
+
             hdul.close()
 
             return (chop, frame_median, para_angle, end_time, temp, airmass,
@@ -208,6 +210,8 @@ class FileInfo(object):
                     channel_medians, channel_stds)
             
         else:
+
+            del hdul.data
 
             hdul.close()
 
