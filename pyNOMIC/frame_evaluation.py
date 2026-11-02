@@ -250,7 +250,7 @@ class EvaluateFrames(object):
 def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp, pxscale=0.0179,
                      windowsize=20, model_trefoil=True, model_ghost=True, subtract_psf=False,
                      psf_subtracted_dir=None, method="median", buffer_type="frames", 
-                     integrated_path=None, tolerance=0.9, memoryMode=1, parallel_func="processors",
+                     integrated_path=None, tolerance=0.9, memoryMode=1, parallel_mode="processors",
                      threadcount=os.cpu_count()):
 
     """
@@ -298,7 +298,7 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
         If set to 0, frames are retrieved from aligned_files as an
         image cube (from memory). If set to 1, frames are opened from
         aligned_files as a list of files. Default is 1.
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading,
         "processors" specifies multiprocessing (default)
@@ -496,7 +496,7 @@ def frame_rejection(chops, params, sigma=None):
     return bools
     
 def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bin=50, prefix='',
-                  memoryMode=1, parallel_func="processors", threadcount=os.cpu_count()):
+                  memoryMode=1, parallel_mode="processors", threadcount=os.cpu_count()):
 
     """
     Bin frames temporally, and update chop states and parallactic angle.
@@ -525,7 +525,7 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
         If set to 0, frames are returned to memory.
         If set to 1, frames are saved to files.
         Default is 1.
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading,
         "processors" specifies multiprocessing (default)
@@ -594,12 +594,12 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
         binned_frames = np.zeros((numbinfiles, array_shape[0], array_shape[1]))
         
         #if __name__ == "__main__":
-        with Pool(threadcount) as pool:
+        with parallel_func(threadcount) as pool:
             a_binned_frames, a_binned_angles, a_binned_filenames =\
             zip(*tqdm(pool.imap(BinFrames((array_shape, None)), zip(a_angles, a_binfiles))))
 
         #if __name__ == "__main__":
-        with Pool(threadcount) as pool:
+        with parallel_func(threadcount) as pool:
             b_binned_frames, b_binned_angles, b_binned_filenames =\
             zip(*tqdm(pool.imap(BinFrames((array_shape, None)), zip(b_angles, b_binfiles))))
 
@@ -641,7 +641,7 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
     else:
             
         #if __name__ == "__main__":
-        with Pool(threadcount) as pool:
+        with parallel_func(threadcount) as pool:
             a_binned_angles, a_binned_filenames = zip(*tqdm(pool.imap(BinFrames((array_shape,
                                                                                  binned_dir)),
                                                                       zip(a_angles, a_binfiles))))
@@ -650,7 +650,7 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
                                                np.asarray(a_binned_filenames))
         
         #if __name__ == "__main__":
-        with Pool(threadcount) as pool:
+        with parallel_func(threadcount) as pool:
             b_binned_angles, b_binned_filenames = zip(*tqdm(pool.imap(BinFrames((array_shape,
                                                                                  binned_dir)),
                                                                       zip(b_angles, b_binfiles))))

@@ -386,7 +386,7 @@ class EmpiricalPSF:
 #----------------------------------------
 
 def integrate_files_buffer(files, tolerance=0.9,
-                           parallel_func="threads", threadcount=50):
+                           parallel_mode="threads", threadcount=50):
 
     """
     Parameters (contained inside a tuple):
@@ -396,7 +396,7 @@ def integrate_files_buffer(files, tolerance=0.9,
     tolerance (optional): float
         Fraction of available memory to be used for integration.
         Default value is 0.9.
-    parallel_func (optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing 
@@ -453,7 +453,7 @@ def integrate_files_buffer(files, tolerance=0.9,
     return mean_frame
 
 def integrate_frames_buffer(files, method="median", tolerance=0.9,
-                            parallel_func="threads", threadcount=50):
+                            parallel_mode="threads", threadcount=50):
 
     """
     Integrates a sequence of frames by dividing the frames themselves into
@@ -469,7 +469,7 @@ def integrate_frames_buffer(files, method="median", tolerance=0.9,
     tolerance (optional): float
         Fraction of available memory to be used for integration.
         Default value is 0.9.
-    parallel_func (optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing 
@@ -561,7 +561,7 @@ def channel_stats(image):
     return np.nanmedian(channels, axis=1), np.nanstd(channels, axis=1)
 
 def get_raw_psf_maxima(files, original_psf_locs, edge_cut=2,
-                       windowsize=3, parallel_func="threads", threadcount=50):
+                       windowsize=3, parallel_mode="threads", threadcount=50):
 
     """
     Get PSF maxima from raw images using PSF locations.
@@ -580,7 +580,7 @@ def get_raw_psf_maxima(files, original_psf_locs, edge_cut=2,
     windowsize: integer
         Half width/height of the reference cutout image
         (which is 1:1 aspect ratio)
-    parallel_func (optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing 

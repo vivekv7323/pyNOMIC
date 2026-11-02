@@ -546,7 +546,7 @@ def create_badmap(files, sigma=1, smooth=30, edge_cut=3, growth=1,
 def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = None,
                skip_target_check=False, recalc_para_angles=False, correct_linearity=True,
                frame_median_limit = 28000, cold_stop_crop=0, ncoadds=2,
-               parallel_func="threads", threadcount=50):
+               parallel_mode="threads", threadcount=50):
     """
     Sets up data by reading parameters from the fits headers and
     creating high pass frames for chop identification. For double sided
@@ -579,7 +579,7 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
         the case of double-sided imaging.
     ncoadds (optional): integer
         Number of coadded frames in each image.
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing
@@ -702,7 +702,7 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
     return files, chops, header_info
 
 def highpass(files, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None,
-             use_temp_flat=True, smooth=30, binsize=10, parallel_func="threads",
+             use_temp_flat=True, smooth=30, binsize=10, parallel_mode="threads",
              threadcount=50):
     """
     Sets up data by reading parameters from the fits headers and
@@ -726,7 +726,7 @@ def highpass(files, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None,
         Outer radius of the star mask
     binsize (optional): integer
         Number of pixels for spatial binning.
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing
@@ -955,7 +955,7 @@ def frame_med_chop_identification(orig_frame_medians, files=None,
     return chops, frame_medians, chopm
 
 def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
-                                size=3, cutout=[], parallel_func="threads",
+                                size=3, cutout=[], parallel_mode="threads",
                                 threadcount=50):
     
     """
@@ -977,7 +977,7 @@ def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
         which to calculate the 1-D maximum.
     cutout (optional): list
         List of slicing indices to crop the image.
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing
@@ -1145,7 +1145,7 @@ def chop_correction(orig_files, orig_chops, orig_header_info,
 
 def chop_finder(orig_files, orig_para_angles, directory, metrics=["locdiff"],
                 chop_direction = 'UP-DOWN', coadd_limit = 10,
-                parallel_func="threads", threadcount=50):
+                parallel_mode="threads", threadcount=50):
 
     """
     Measures the chop states of each file by examining input frames and
@@ -1178,7 +1178,7 @@ def chop_finder(orig_files, orig_para_angles, directory, metrics=["locdiff"],
         Default value is "UP-DOWN", used for single-sided imaging.
     coadd_limit (optional): integer
         Maximum number of frames that can be coadded. Default is 10.
-     parallel_func(optional): string
+     parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing

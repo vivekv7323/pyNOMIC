@@ -1359,7 +1359,7 @@ def subtract_psfs(files, chops, stellar_temp,
         Maximum allowed failcode, used in replacing failed psf fits.
     prefix (optional): string
         Prefix to add to directory name when saving image.
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing
@@ -1422,7 +1422,7 @@ def subtract_psfs(files, chops, stellar_temp,
 
     if len(failed_indices) > 0:
         #if __name__ == "__main__":
-        with parallel_d(threadcount) as pool:
+        with parallel_func(threadcount) as pool:
     
             (new_max_x,
              new_max_y) = zip(*tqdm(pool.imap(PSFSubRedux((psf_subtracted_dir, files,
@@ -1460,7 +1460,7 @@ def parallelized_chop_subtraction(files, chops, prefix='',
         entries are either "CHOP_A" or "CHOP_B"
     prefix (optional): string
         Prefix to add to directory name when saving image.
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing
@@ -1574,7 +1574,7 @@ def chop_align(files, chops, maxima=None, offsets=None, channel_edges=[127, 255,
         component frames. Enabled by default.
     prefix (optional): string
         Prefix to add to directory name when saving image.
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading,
         "processors" specifies multiprocessing (default)
@@ -1768,7 +1768,7 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
         Number of pixels to remove at the edges of images
     prefix (optional): string
         Prefix to add to directory name when saving image.
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing
@@ -1816,7 +1816,7 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
 def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask=None,
                        alignment_method="fitting", interp_method="cubic", windowsize=20,
                        stellar_temp=5778, actmax=False, model_trefoil=True, boxcar=False,
-                       save_files=True, prefix='', parallel_func="processors",
+                       save_files=True, prefix='', parallel_mode="processors",
                        threadcount=os.cpu_count()):
 
     """
@@ -1863,7 +1863,7 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
         Enables saving the aligned files, True by default.
     prefix (optional): string
         Prefix to add to directory name when saving image.
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading,
         "processors" specifies multiprocessing (default)
@@ -2137,7 +2137,7 @@ def mask_files(files, directory, locs, array_shape, nbg=1,
         oversubtracted psf
     nan_mask_radius (optional): integer
         Radius of the nan mask
-    parallel_func(optional): string
+    parallel_mode (optional): string
         Determines parallelization method.
         "threads" specifies multithreading (default),
         "processors" specifies multiprocessing
