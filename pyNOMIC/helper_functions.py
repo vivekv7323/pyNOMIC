@@ -2,6 +2,7 @@
 # IMPORTS
 #----------------------------------------
 import os, psutil
+import warnings
 import numpy as np
 from tqdm.auto import tqdm
 from multiprocessing.pool import ThreadPool
@@ -436,16 +437,19 @@ def integrate_files_buffer(files, tolerance=0.9,
 
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
     with parallel_func(threadcount) as pool:
         bigarr, filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)),
-                                                     filebufs),
-                                           desc="integrating files", total=len(filebufs)))
+                                                 filebufs, initializer=initializer),
+                                       desc="Integrating files...",
+                                       total=len(filebufs)))
 
     # Create chopa flat by mean of the images
     mean_frame = np.sum(bigarr, axis=0)/np.sum(filecounts)
@@ -505,16 +509,19 @@ def integrate_frames_buffer(files, method="median", tolerance=0.9,
     
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
     with parallel_func(threadcount) as pool:
          frame_fragments,_ = zip(*tqdm(pool.imap(FrameBufferIntegration((files, indices,
-                                                                          array_shape, method)),
-                               range(chunks)), desc="integrating files", total=chunks))
+                                                                         array_shape, method)),
+                                                 range(chunks), initializer=initializer),
+                                       desc="Integrating files...", total=chunks))
 
     return np.concatenate(frame_fragments)
 
@@ -596,8 +603,10 @@ def get_raw_psf_maxima(files, original_psf_locs, edge_cut=2,
 
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
     
@@ -607,8 +616,10 @@ def get_raw_psf_maxima(files, original_psf_locs, edge_cut=2,
                                                             original_psf_locs,
                                                             edge_cut,
                                                             windowsize)),
-                                       range(len(files))),
-                             total=len(files), desc="Measuring PSF maxima"))
+                                              range(len(files)),
+                                              initializer=initializer),
+                                    total=len(files),
+                                    desc="Measuring PSF maxima..."))
         )
 
     return np.asarray(raw_psf_maxima)
@@ -1250,6 +1261,21 @@ def Hyperbola2D(xy, amp, sigma, axis_ratio, offset, x0, y0, p, ravel=True):
         return model.ravel()
     else:
         return model
+
+
+def BloomModel(xy, amp, sigmax, offset, x0, y0, ravel=True):
+    '''
+    NOMIC blooming model
+    '''
+    x, y = xy
+
+    model = offset+amp*((x - x0))*np.exp(-1*(sigmax*(x-x0))**2)
+    
+    if ravel:
+        return model.ravel()
+    else:
+        return model
+
 
 def seq_empirical_psf_fit(cutout, wvl_interp, relative_flux,
                           model_trefoil=True, model_ghost=False,
@@ -2054,3 +2080,7 @@ def stellar_flux_density(wavelengths, distance, stellar_radius, stellar_temp):
     '''
     
     return spectral_flux_density
+
+def ignore_warnings():
+
+    warnings.filterwarnings("ignore", category=RuntimeWarning)

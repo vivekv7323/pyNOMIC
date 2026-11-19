@@ -10,6 +10,7 @@ from scipy.stats import linregress
 from vip_hci.psfsub.utils_pca import pca_annulus
 from vip_hci.psfsub.pca_local import pca_annular
 import pyNOMIC.helper_functions as hf
+from multiprocessing.pool import ThreadPool
 
 #----------------------------------------
 # CLASSES
@@ -528,7 +529,7 @@ def inject_source(frames, para_angles, reffits, array_shape,
     if threadcount != 0:
         
         #if __name__ == "__main__":
-        with Pool(threadcount) as pool:
+        with ThreadPool(threadcount) as pool:
                 injected_cube, check_array = \
                     zip(*pool.imap(InjectSource((first_arg, injected_dir, wx, wy, array_shape,
                                                  injection_radius, injection_angle, contrast,
@@ -739,7 +740,7 @@ def contrast_curve(frames, para_angles, reffits, array_shape, curve_prior,
     coordlist = np.vstack(np.asarray(np.meshgrid(injection_radii, injection_angles)).T)
 
     if threadcount > 1:
-        with Pool(threadcount) as pool:
+        with ThreadPool(threadcount) as pool:
             (approx_contrast_list,
              snrs_list) = zip(*tqdm(pool.imap(ForwardModel((frames, para_angles, reffits,
                                                             array_shape, curve_prior,
@@ -805,7 +806,7 @@ def snr_map(image, aperture_radius=14, threadcount=50):
     origin = [array_shape[1]/2 - 0.5, array_shape[0]/2 - 0.5]
 
     #if __name__ == "__main__":
-    with Pool(threadcount) as pool:
+    with ThreadPool(threadcount) as pool:
             snrs, noise_factors, = \
                 zip(*tqdm(pool.imap(FluxSNR((image, array_shape,
                                         origin, aperture_radius)),

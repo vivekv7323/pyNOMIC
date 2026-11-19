@@ -8,6 +8,7 @@ from multiprocessing.pool import ThreadPool
 from multiprocessing import Pool
 from astropy.io import fits
 
+from scipy.stats import pearsonr
 from scipy.signal import correlate
 
 import pyNOMIC.helper_functions as hf
@@ -182,8 +183,10 @@ class EvaluateFrames(object):
         max_mask =  hf.circular_mask(((array_shape[1]/2 - 0.5), (array_shape[0]/2 - 0.5)), 
                                      windowsize, array_shape[0], array_shape[1])
         
-        # Compute background deviation by excluding values 3 sigma above the image median
-        background_dev = np.nanstd(frame[~max_mask])
+        # Compute background deviation by excluding values outside the window
+        background_dev = np.nanstd(frame[max_mask])
+
+        psf_dev = np.nanstd(frame[~max_mask])
 
         # Remove all nans for cross correlation, replace with 0s
         frame[np.isnan(frame)] = 0
@@ -240,15 +243,95 @@ class EvaluateFrames(object):
 
                 image = None
         
-        return (psfmaxima, background_dev, corr, np.nanstd(residual), lbtfit,
+        return (psfmaxima, background_dev, psf_dev, corr, np.nanstd(residual), lbtfit,
                     reffit, image)
+
+class EvaluatePSFResiduals(object):
+    
+    def __init__(self, params):
+
+        """
+        Parameters (contained inside a tuple):
+        ----------------------
+        psfres_files: string/Path object
+            Directory where images are read from
+        chopa_integrated_crop: 2D image array
+            Stacked and cropped image frame for CHOP_A
+        chopb_integrated_crop: 2D image array
+            Stacked and cropped image frame for CHOP_B
+        windowsize: integer
+            Half width/height of the cutout/cropped image
+            (which is 1:1 aspect ratio)
+        origin: float tuple
+            Pixel coordinates of the PSF in the image.
+        """
+        
+        self.params = params
+        
+    def __call__(self, chop_file_tuple):
+
+        """
+        Parameters:
+        ----------------------
+        chop_file_tuple: tuple containing 'chop' and 'file'
+
+            chop: string
+                Current chop states, either "CHOP_A" or "CHOP_B"
+                
+            file: string/Path object
+                Path to raw image file
+        Returns:
+        ----------------------   
+        corr: float
+            Maximum value of the cross correlation of the frame and
+            its respective mean/median frame.
+        DOCUMENTATION PENDING
+        """
+        
+        (psfres_files, chopa_integrated_crop,
+         chopb_integrated_crop, windowsize, origin) = self.params
+
+        chop, file = chop_file_tuple
+
+        # if an array of files is not provided, file is a path
+        if psfres_files is None:
+            hdul = fits.open(file)
+            frame = hdul[0].data[(int(origin[0])-windowsize):(int(origin[0])+windowsize),
+                                 (int(origin[1])-windowsize):(int(origin[1])+windowsize)]
+            hdul.close()
+        # if an array of files is provided, file is an index
+        else:
+            frame = psfres_files[(int(origin[0])-windowsize):(int(origin[0])+windowsize),
+                                 (int(origin[1])-windowsize):(int(origin[1])+windowsize)]
+
+        # Remove all nans for cross correlation, replace with 0s
+        frame[np.isnan(frame)] = 0
+
+        # Use corresponding average frame based on chop state
+        if chop == "CHOP_B":
+            
+            corr = np.max(correlate(chopb_integrated_crop, frame))
+            result = pearsonr(chopb_integrated_crop.flatten(), frame.flatten())
+            fluxdev = np.nanstd(chopb_integrated_crop - frame)
+            maxflux = np.nanmax(np.abs(chopb_integrated_crop - frame))
+            
+        else:
+            
+            corr = np.max(correlate(chopa_integrated_crop, frame))
+            result = pearsonr(chopa_integrated_crop.flatten(), frame.flatten())
+            fluxdev = np.nanstd(chopb_integrated_crop - frame)
+            maxflux = np.nanmax(np.abs(chopb_integrated_crop - frame))
+                        
+        pear = result[0]
+
+        return (corr, pear, fluxdev, maxflux)
 
 #----------------------------------------
 # FUNCTIONS
 #----------------------------------------
 
 def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp, pxscale=0.0179,
-                     windowsize=20, model_trefoil=True, model_ghost=True, subtract_psf=False,
+                     windowsize=20, model_trefoil=True, model_ghost=False, subtract_psf=False,
                      psf_subtracted_dir=None, method="median", buffer_type="frames", 
                      integrated_path=None, tolerance=0.9, memoryMode=1, parallel_mode="processors",
                      threadcount=os.cpu_count()):
@@ -292,6 +375,9 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
         Specifies which type of buffer to use, either "files" or
         "frames". Set to "frames" by default. Note that using median
         integration and file buffers are incompatible.
+    integrated_path (optional): path
+        Path to output npz file containing chopa_integrated
+        and chopb_integrated
     tolerance (optional): float
         Fraction of available memory to be used for integration.
     memoryMode (optional): integer
@@ -340,8 +426,10 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
 
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
 
@@ -371,14 +459,15 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
             
         #if __name__ == "__main__":
         with parallel_func(threadcount) as pool:
-            (psfmaxima, background_dev, correlations,
+            (psfmaxima, background_dev, psf_dev, correlations,
              residual_dev, lbtfits, reffits, images) =\
              zip(*tqdm(pool.imap(EvaluateFrames((aligned_files, chopa_integrated, chopb_integrated,
                                                  wx, wy, windowsize, array_shape, wvl_interp,
                                                  relative_flux, model_trefoil, model_ghost,
                                                  subtract_psf, psf_subtracted_dir)),
-                                 np.array((chops, np.arange(len(aligned_files)))).T),
-                       total=len(aligned_files), desc="Evaluating frames"))
+                                 np.array((chops, np.arange(len(aligned_files)))).T,
+                                 initializer=initializer),
+                       total=len(aligned_files), desc="Evaluating frames..."))
         
     else:
         
@@ -389,23 +478,27 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
                 chopa_integrated = hf.integrate_frames_buffer(aligned_files[chops=="CHOP_A"],
                                                               method=method,
                                                               tolerance=tolerance,
-                                                              threadcount=threadcount)
+                                                              threadcount=threadcount,
+                                                              parallel_mode=parallel_mode)
                 
                 chopb_integrated = hf.integrate_frames_buffer(aligned_files[chops=="CHOP_B"],
                                                               method=method,
                                                               tolerance=tolerance,
-                                                              threadcount=threadcount)
+                                                              threadcount=threadcount,
+                                                              parallel_mode=parallel_mode)
             else:
                 
                 if method == "mean":
                     
                     chopa_integrated = hf.integrate_files_buffer(aligned_files[chops=="CHOP_A"],
                                                                  tolerance=tolerance,
-                                                                 threadcount=threadcount)
+                                                                 threadcount=threadcount,
+                                                                 parallel_mode=parallel_mode)
                     
                     chopb_integrated = hf.integrate_files_buffer(aligned_files[chops=="CHOP_B"],
                                                                  tolerance=tolerance,
-                                                                 threadcount=threadcount)
+                                                                 threadcount=threadcount,
+                                                                 parallel_mode=parallel_mode)
                 else:
                     raise ValueError("Incompatible integration method and buffer type")
 
@@ -421,14 +514,14 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
 
         #if __name__ == "__main__":
         with parallel_func(threadcount) as pool:
-            (psfmaxima, background_dev, correlations,
+            (psfmaxima, background_dev, psf_dev, correlations,
              residual_dev, lbtfits, reffits, images) =\
              zip(*tqdm(pool.imap(EvaluateFrames((None, chopa_integrated, chopb_integrated, wx, wy,
                                                  windowsize, array_shape, wvl_interp,
                                                  relative_flux, model_trefoil, model_ghost, 
                                                  subtract_psf, psf_subtracted_dir)),
-                                 np.array((chops, aligned_files)).T), total=len(aligned_files),
-                       desc="Evaluating frames"))
+                                 np.array((chops, aligned_files)).T, initializer=initializer),
+                       total=len(aligned_files), desc="Evaluating frames..."))
 
     # Convert lists into numpy arrays
     lbtfits, reffits = np.asarray(lbtfits), np.asarray(reffits)
@@ -442,8 +535,8 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
     eccentricities[np.isnan(eccentricities)] = eccentricities_r[np.isnan(eccentricities)]
     
     return (fwhms, eccentricities, np.asarray(psfmaxima), np.asarray(background_dev),
-            np.asarray(correlations), np.asarray(residual_dev), lbtfits,
-            reffits, images)
+            np.asarray(psf_dev), np.asarray(correlations), np.asarray(residual_dev),
+            lbtfits, reffits, images)
 
 def frame_rejection(chops, params, sigma=None):
 
@@ -583,8 +676,10 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
 
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
 
@@ -596,12 +691,14 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
         #if __name__ == "__main__":
         with parallel_func(threadcount) as pool:
             a_binned_frames, a_binned_angles, a_binned_filenames =\
-            zip(*tqdm(pool.imap(BinFrames((array_shape, None)), zip(a_angles, a_binfiles))))
+            zip(*tqdm(pool.imap(BinFrames((array_shape, None)), zip(a_angles, a_binfiles),
+                                initializer=initializer)))
 
         #if __name__ == "__main__":
         with parallel_func(threadcount) as pool:
             b_binned_frames, b_binned_angles, b_binned_filenames =\
-            zip(*tqdm(pool.imap(BinFrames((array_shape, None)), zip(b_angles, b_binfiles))))
+            zip(*tqdm(pool.imap(BinFrames((array_shape, None)), zip(b_angles, b_binfiles),
+                                initializer=initializer)))
 
         # Sort filenames in order
         binned_filenames = np.asarray(sorted(a_binned_filenames+b_binned_filenames))
@@ -644,7 +741,8 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
         with parallel_func(threadcount) as pool:
             a_binned_angles, a_binned_filenames = zip(*tqdm(pool.imap(BinFrames((array_shape,
                                                                                  binned_dir)),
-                                                                      zip(a_angles, a_binfiles))))
+                                                                      zip(a_angles, a_binfiles),
+                                                                      initializer=initializer)))
             
         a_binned_angles, a_binned_filenames = (np.asarray(a_binned_angles),
                                                np.asarray(a_binned_filenames))
@@ -653,7 +751,8 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
         with parallel_func(threadcount) as pool:
             b_binned_angles, b_binned_filenames = zip(*tqdm(pool.imap(BinFrames((array_shape,
                                                                                  binned_dir)),
-                                                                      zip(b_angles, b_binfiles))))
+                                                                      zip(b_angles, b_binfiles),
+                                                                      initializer=initializer)))
             
         b_binned_angles, b_binned_filenames = (np.asarray(b_binned_angles), 
                                                np.asarray(b_binned_filenames))
@@ -684,3 +783,170 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
                                                             == binned_filenames[i])[0]][0]
         
         return binned_files, binned_chops, binned_angles
+
+def psf_residual_evaluation(psfres_files, chops, array_shape, file_size,
+                            windowsize=20, method="median", buffer_type="frames", 
+                            integrated_path=None, tolerance=0.9, memoryMode=1,
+                            parallel_mode="processors", threadcount=os.cpu_count()):
+
+    """
+    Evaluates PSF residuals.
+    
+    Parameters:
+    ----------------------
+    psfres_files: list or array
+        List of file paths, sorted 
+    chops: string array
+        List of chop states corresponding to the file list,
+        entries are either "CHOP_A" or "CHOP_B"
+    array_shape: integer tuple
+        Tuple containing image dimensions, from numpy.shape
+    file_size: float
+        File size of aligned images.
+    windowsize (optional): integer
+        Half width/height of the reference cutout image
+        (which is 1:1 aspect ratio). Default is 20 pixels.
+    method (optional): string
+        Method to  create a stacked image, either by taking the "mean"
+        or "median". Default is "median".
+    buffer_type (optional): string
+        Specifies which type of buffer to use, either "files" or
+        "frames". Set to "frames" by default. Note that using median
+        integration and file buffers are incompatible.
+    tolerance (optional): float
+        Fraction of available memory to be used for integration.
+    integrated_path (optional): path
+        Path to output npz file containing chopa_integrated
+        and chopb_integrated
+    memoryMode (optional): integer
+        If set to 0, frames are retrieved from psfres_files as an
+        image cube (from memory). If set to 1, frames are opened from
+        psfres_files as a list of files. Default is 1.
+    parallel_mode (optional): string
+        Determines parallelization method.
+        "threads" specifies multithreading,
+        "processors" specifies multiprocessing (default)
+    threadcount (optional): integer
+        Number of threads to employ in parallelization.
+        Default value is the logical CPU count.
+
+    Returns:
+    ----------------------     
+    corr: 1D numpy array
+        Maximum values of the cross correlation of the frames
+        and their respective mean frames.
+    """
+
+    if parallel_mode == "threads":
+        parallel_func = ThreadPool
+        initializer = None
+    elif parallel_mode == "processors":
+        parallel_func = Pool
+        initializer = hf.ignore_warnings()
+    else:
+        raise ValueError("Invalid parallelization method")
+
+    origin = [array_shape[1]/2 - 0.5, array_shape[0]/2 - 0.5]
+
+    # Files are in memory
+    if memoryMode == 0:
+
+        if integrated_path is None:
+            
+            # Create averaged frames for each chop state
+            if method == "mean":
+                chopa_integrated = np.nanmean(psfres_files[chops == "CHOP_A"], axis=0)
+                chopb_integrated = np.nanmean(psfres_files[chops == "CHOP_B"], axis=0)
+            else:
+                chopa_integrated = np.nanmedian(psfres_files[chops == "CHOP_A"], axis=0)
+                chopb_integrated = np.nanmedian(psfres_files[chops == "CHOP_B"], axis=0)
+
+            # Set nans to 0 to allow correlation to proceed
+            chopb_integrated[np.isnan(chopb_integrated)] = 0
+            chopa_integrated[np.isnan(chopa_integrated)] = 0
+            np.savez("Integrated_NOMIC_psfsubtracted_frames.npz", chopa_integrated, chopb_integrated)
+
+        else:
+            
+            stacks = np.load(integrated_path)
+            chopa_integrated = stacks["arr_0"]
+            chopb_integrated = stacks["arr_1"]
+
+        chopa_integrated_crop = chopa_integrated[(int(origin[0])-windowsize):(int(origin[0])+windowsize),
+                                                 (int(origin[1])-windowsize):(int(origin[1])+windowsize)]
+
+        chopb_integrated_crop = chopb_integrated[(int(origin[0])-windowsize):(int(origin[0])+windowsize),
+                                                 (int(origin[1])-windowsize):(int(origin[1])+windowsize)]
+            
+        #if __name__ == "__main__":
+        with parallel_func(threadcount) as pool:
+            (corrs,
+             pears,
+             fluxdevs,
+             maxfluxs) =\
+            zip(*tqdm(pool.imap(EvaluatePSFResiduals((psfres_files, chopa_integrated_crop,
+                                                      chopb_integrated_crop, windowsize, origin)),
+                                np.array((chops, np.arange(len(psfres_files)))).T, initializer=initializer),
+                       total=len(psfres_files), desc="Evaluating PSF residuals..."))
+        
+    else:
+        
+        if integrated_path is None:
+            
+            if buffer_type == "frames":
+                
+                chopa_integrated = hf.integrate_frames_buffer(psfres_files[chops=="CHOP_A"],
+                                                              method=method,
+                                                              tolerance=tolerance,
+                                                              threadcount=threadcount,
+                                                              parallel_mode=parallel_mode)
+                
+                chopb_integrated = hf.integrate_frames_buffer(psfres_files[chops=="CHOP_B"],
+                                                              method=method,
+                                                              tolerance=tolerance,
+                                                              threadcount=threadcount,
+                                                              parallel_mode=parallel_mode)
+            else:
+                
+                if method == "mean":
+                    
+                    chopa_integrated = hf.integrate_files_buffer(psfres_files[chops=="CHOP_A"],
+                                                                 tolerance=tolerance,
+                                                                 threadcount=threadcount,
+                                                                 parallel_mode=parallel_mode)
+                    
+                    chopb_integrated = hf.integrate_files_buffer(psfres_files[chops=="CHOP_B"],
+                                                                 tolerance=tolerance,
+                                                                 threadcount=threadcount,
+                                                                 parallel_mode=parallel_mode)
+                else:
+                    raise ValueError("Incompatible integration method and buffer type")
+
+            chopb_integrated[np.isnan(chopb_integrated)] = 0
+            chopa_integrated[np.isnan(chopa_integrated)] = 0
+            np.savez("Integrated_NOMIC_psfsubtracted_frames.npz", chopa_integrated, chopb_integrated)
+            
+        else:
+            
+            stacks = np.load(integrated_path)
+            chopa_integrated = stacks["arr_0"]
+            chopb_integrated = stacks["arr_1"]
+
+        chopa_integrated_crop = chopa_integrated[(int(origin[0])-windowsize):(int(origin[0])+windowsize),
+                                                 (int(origin[1])-windowsize):(int(origin[1])+windowsize)]
+
+        chopb_integrated_crop = chopb_integrated[(int(origin[0])-windowsize):(int(origin[0])+windowsize),
+                                                 (int(origin[1])-windowsize):(int(origin[1])+windowsize)]
+
+        #if __name__ == "__main__":
+        with parallel_func(threadcount) as pool:
+            (corrs,
+             pears,
+             fluxdevs,
+             maxfluxs) =\
+             zip(*tqdm(pool.imap(EvaluatePSFResiduals((None, chopa_integrated_crop,
+                                                       chopb_integrated_crop, windowsize, origin)),
+                                 np.array((chops, psfres_files)).T, initializer=initializer),
+                       total=len(psfres_files), desc="Evaluating PSF residuals..."))
+    
+    return np.asarray(corrs), np.asarray(pears), np.asarray(fluxdevs), np.asarray(maxfluxs)

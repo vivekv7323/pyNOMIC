@@ -201,7 +201,8 @@ class FileInfo(object):
                                 overwrite=True)
                 newhdul.close()
 
-            del hdul.data
+            del hdul[0].data
+            del orig
 
             hdul.close()
 
@@ -211,7 +212,8 @@ class FileInfo(object):
             
         else:
 
-            del hdul.data
+            del hdul[0].data
+            del orig
 
             hdul.close()
 
@@ -656,8 +658,10 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
         
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
 
@@ -672,7 +676,8 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
              
          zip(*tqdm(pool.imap(FileInfo((new_raw_dirs, obj, skip_target_check, recalc_para_angles,
                                        frame_median_limit, cold_stop_crop, corrector)),
-                             files), total=len(files), desc="Reading file headers"))
+                             files, initializer=initializer),
+                   total=len(files), desc="Reading file headers"))
         )
         
     if correct_linearity & (len(new_raw_dirs) != 2):
@@ -778,15 +783,18 @@ def highpass(files, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None,
 
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
     with parallel_func(threadcount) as pool:
         results = (zip(*tqdm(pool.imap(HighPass((highpass_dir, bools, highpassmask,
-                                                 tempflat, smooth, binsize)), files),
+                                                 tempflat, smooth, binsize)), files,
+                                       initializer=initializer),
                              total=len(files), desc="Creating high pass filtered frames"))
         )
 
@@ -1002,8 +1010,10 @@ def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
     
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
 
@@ -1011,7 +1021,7 @@ def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
     with parallel_func(threadcount) as pool:
         measures, indices =\
             zip(*tqdm(pool.imap(FourierMean((files, sigma, cutout)),
-                                range(len(files))),
+                                range(len(files)), initializer=initializer),
                       desc="Calculating fourier means", total=(len(files))))
 
     
@@ -1241,8 +1251,10 @@ def chop_finder(orig_files, orig_para_angles, directory, metrics=["locdiff"],
 
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
     
@@ -1250,7 +1262,7 @@ def chop_finder(orig_files, orig_para_angles, directory, metrics=["locdiff"],
     with parallel_func(threadcount) as pool:
         minmax, stdev, bgmean, locdiff, maxima, chop_guesses, indices =\
             zip(*tqdm(pool.imap(ChopMetrics((files, directory, array_shape, chop_direction)),
-                                range(len(files)-1)),
+                                range(len(files)-1), initializer=initializer),
                       desc="Calculating chop metrics", total=(len(files)-1)))
         
     # Normalize all metrics to the mean, convert to numpy arrays

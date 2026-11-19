@@ -519,10 +519,6 @@ class ChopAlign(object):
             Array enumerating columns of the alignment grid
         py: 1D numpy array
             Array enumerating rows of the alignment grid
-        ref_index: integer
-            File index of the reference
-        smooth: integer
-            Radius of smoothing kernel
         channel_edges: list of integers
             List containing indices corresponding to the central row of
             channel edges
@@ -548,12 +544,14 @@ class ChopAlign(object):
         registration_method: string
             Method by which to align chop residuals. Default
             is grid alignment.
+        ref_index: integer
+            File index of the reference
         nbg: integer
             Number of frames to use in chop background subtraction
-        smooth: integer
-            Radius of smoothing kernel, divided by 5
         edge_cut: integer
             Number of pixels to remove at the edges of images
+        smooth: integer
+            Radius of smoothing kernel
         search_rad: integer
             Search radius in pixels for finding chop offsets.
         iterations: integer
@@ -597,7 +595,7 @@ class ChopAlign(object):
          reference, px, py, channel_edges, striped_regions,
          biased_columns, biased_rows, vertical_biases,
          horizontal_biases, interp_method, registration_method,
-         ref_index, smooth, nbg, edge_cut, search_rad, iterations,
+         ref_index, nbg, edge_cut, smooth, search_rad, iterations,
          nan_mask_radius, create_residual, save_file) = self.params
 
         hdul = fits.open(files[i])
@@ -1148,7 +1146,8 @@ class RegisterFrames(object):
 #----------------------------------------
 
 def create_stacked_flat(files, chops, chop_direction="UP-DOWN", method="median",
-                        buffer_type="frames", tolerance=0.9, threadcount=50):
+                        buffer_type="frames", tolerance=0.9, threadcount=50,
+                        parallel_mode="processors"):
     
     """
     Creates a stacked flat frame for each chop state. They are either
@@ -1191,15 +1190,19 @@ def create_stacked_flat(files, chops, chop_direction="UP-DOWN", method="median",
 
     if buffer_type == "frames":
         chopa_integrated = hf.integrate_frames_buffer(files[chops=="CHOP_A"], method=method,
-                                                      tolerance=tolerance, threadcount=threadcount)
+                                                      tolerance=tolerance, threadcount=threadcount,
+                                                      parallel_mode=parallel_mode)
         chopb_integrated = hf.integrate_frames_buffer(files[chops=="CHOP_B"], method=method,
-                                                      tolerance=tolerance, threadcount=threadcount)
+                                                      tolerance=tolerance, threadcount=threadcount,
+                                                      parallel_mode=parallel_mode)
     else:        
         if method == "mean":
             chopa_integrated = hf.integrate_files_buffer(files[chops=="CHOP_A"], tolerance=tolerance,
-                                                         threadcount=threadcount)
+                                                         threadcount=threadcount,
+                                                         parallel_mode=parallel_mode)
             chopb_integrated = hf.integrate_files_buffer(files[chops=="CHOP_B"], tolerance=tolerance,
-                                                         threadcount=threadcount)
+                                                         threadcount=threadcount,
+                                                         parallel_mode=parallel_mode)
         else:
             raise ValueError("Incompatible integration method and buffer type")
 
@@ -1393,8 +1396,10 @@ def subtract_psfs(files, chops, stellar_temp,
 
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
 
@@ -1410,8 +1415,8 @@ def subtract_psfs(files, chops, stellar_temp,
                                                         flats, wvl_interp, relative_flux,
                                                         windowsize, nbg, smooth, recur_iteration,
                                                         remove_trefoil, residual_handling)),
-                                        range(len(files))), total=len(files),
-                              desc="Subtracting PSFs"))
+                                        range(len(files)), initializer=initializer),
+                              total=len(files), desc="Subtracting PSFs"))
 
     failcodes, reffits, lbtfits = (np.asarray(failcodes), np.asarray(reffits),
                                             np.asarray(lbtfits))
@@ -1431,8 +1436,8 @@ def subtract_psfs(files, chops, stellar_temp,
                                                            flats, wvl_interp, relative_flux,
                                                            windowsize, fit_reject_criterion,
                                                            nbg, smooth, residual_handling)),
-                                              failed_indices), total=len(failed_indices),
-                                    desc="Subtracting failed PSFs"))
+                                              failed_indices, initializer=initializer),
+                                    total=len(failed_indices), desc="Subtracting failed PSFs"))
             
         maxima[failed_indices] = np.vstack((np.asarray(new_max_x), np.asarray(new_max_y))).T
 
@@ -1483,16 +1488,18 @@ def parallelized_chop_subtraction(files, chops, prefix='',
 
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
     with parallel_func(threadcount) as pool:
         offset_x, offset_y = zip(*tqdm(pool.imap(ChopSubtract((files, chops, chop_subtracted_dir)),
-                                                 range(len(files))), total=len(files),
-                                       desc = "Chop subtracting frames..."))
+                                                 range(len(files)), initializer=initializer),
+                                       total=len(files), desc = "Chop subtracting frames..."))
     # Get file paths
     chop_subtracted_files = sorted(list(pathlib.Path(str(chop_subtracted_dir)).rglob('*.fits')))
     chop_subtracted_files = np.asarray([a for a in chop_subtracted_files if a.name[0] != '.'\
@@ -1665,8 +1672,10 @@ def chop_align(files, chops, maxima=None, offsets=None, channel_edges=[127, 255,
 
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
     
@@ -1683,11 +1692,11 @@ def chop_align(files, chops, maxima=None, offsets=None, channel_edges=[127, 255,
                                                         biased_columns, biased_rows, 
                                                         vertical_biases, horizontal_biases, 
                                                         interp_method, registration_method,
-                                                        ref_index, nbg, smooth, edge_cut,
+                                                        ref_index, nbg, edge_cut, smooth, 
                                                         search_rad, iterations, nan_mask_radius,
                                                         create_residual, save_file)),
-                                      range(len(files))), total=len(files),
-                            desc = "Aligning frames..."))
+                                             range(len(files)), initializer=initializer),
+                                   total=len(files), desc = "Aligning chop residuals..."))
 
     offsets = np.vstack((np.asarray(offset_x), np.asarray(offset_y))).T
     prefit_offsets = np.vstack((np.asarray(prefit_offset_x), np.asarray(prefit_offset_y))).T
@@ -1791,8 +1800,10 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
         
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
         
@@ -1808,8 +1819,8 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
                                                                  flat_offsets, correction_method,
                                                                  channel_method, nbg, smooth,
                                                                  edge_cut)),
-                                             range(len(raw_files))), total=len(raw_files),
-                                   desc = "Subtracting backgrounds..."))
+                                             range(len(raw_files)), initializer=initializer),
+                                   total=len(raw_files), desc = "Subtracting backgrounds..."))
 
     return np.asarray(chopsub_stds), np.asarray(backsub_stds)
 
@@ -2066,8 +2077,10 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
 
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
 
@@ -2081,8 +2094,8 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
                                                                windowsize, alignment_method,
                                                                interp_method, actmax, 
                                                                boxcar, save_files)),
-                                               range(len(files))[2:]), total=len(files) - 2,
-                                     desc="Aligning frames"))
+                                               range(len(files))[2:], initializer=initializer),
+                                     total=len(files) - 2, desc="Aligning frames..."))
 
     # Include first two frame offsets
     offsets = np.concatenate((np.asarray([(first_offset[0], first_offset[1]),
@@ -2156,8 +2169,10 @@ def mask_files(files, directory, locs, array_shape, nbg=1,
         
     if parallel_mode == "threads":
         parallel_func = ThreadPool
+        initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
+        initializer = hf.ignore_warnings()
     else:
         raise ValueError("Invalid parallelization method")
 
@@ -2165,8 +2180,8 @@ def mask_files(files, directory, locs, array_shape, nbg=1,
     with parallel_func(threadcount) as pool:
         results = zip(*tqdm(pool.imap(hf.MaskFrames((files, directory, locs, array_shape,
                                                      nbg, nan_mask_radius)),
-                                      range(len(files))), total=len(files),
-                           desc="Masking files"))
+                                      range(len(files)), initializer=initializer),
+                            total=len(files), desc="Masking files"))
 
     masked_files = sorted(list(pathlib.Path(directory).rglob('*.fits')))
     masked_files = np.asarray([a for a in masked_files if a.name[0]!='.'\
