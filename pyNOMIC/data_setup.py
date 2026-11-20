@@ -661,12 +661,12 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
         
         (chops, frame_medians, para_angles,
          end_times, temps, airmasses,
@@ -676,8 +676,7 @@ def setup_data(obj, raw_dir, double_side=False, start_frame=None, end_frame = No
              
          zip(*tqdm(pool.imap(FileInfo((new_raw_dirs, obj, skip_target_check, recalc_para_angles,
                                        frame_median_limit, cold_stop_crop, corrector)),
-                             files, initializer=initializer),
-                   total=len(files), desc="Reading file headers"))
+                             files), total=len(files), desc="Reading file headers"))
         )
         
     if correct_linearity & (len(new_raw_dirs) != 2):
@@ -786,15 +785,14 @@ def highpass(files, highpassmask_dir=None, badmap_dir=None, tempflat_dir = None,
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
         results = (zip(*tqdm(pool.imap(HighPass((highpass_dir, bools, highpassmask,
-                                                 tempflat, smooth, binsize)), files,
-                                       initializer=initializer),
+                                                 tempflat, smooth, binsize)), files),
                              total=len(files), desc="Creating high pass filtered frames"))
         )
 
@@ -1013,16 +1011,16 @@ def fourier_chop_identification(files, sigma=1.5, threshold=0.1,
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
         measures, indices =\
             zip(*tqdm(pool.imap(FourierMean((files, sigma, cutout)),
-                                range(len(files)), initializer=initializer),
-                      desc="Calculating fourier means", total=(len(files))))
+                                range(len(files))),
+                      desc="Calculating fourier means...", total=(len(files))))
 
     
     chops = np.array(["CHOP_A"]*len(measures))
@@ -1254,15 +1252,15 @@ def chop_finder(orig_files, orig_para_angles, directory, metrics=["locdiff"],
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount,  initializer=initializer) as pool:
         minmax, stdev, bgmean, locdiff, maxima, chop_guesses, indices =\
             zip(*tqdm(pool.imap(ChopMetrics((files, directory, array_shape, chop_direction)),
-                                range(len(files)-1), initializer=initializer),
+                                range(len(files)-1)),
                       desc="Calculating chop metrics", total=(len(files)-1)))
         
     # Normalize all metrics to the mean, convert to numpy arrays

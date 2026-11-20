@@ -440,14 +440,14 @@ def integrate_files_buffer(files, tolerance=0.9,
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
         bigarr, filecounts = zip(*tqdm(pool.imap(IntegrateFrames((array_shape)),
-                                                 filebufs, initializer=initializer),
+                                                 filebufs),
                                        desc="Integrating files...",
                                        total=len(filebufs)))
 
@@ -512,15 +512,15 @@ def integrate_frames_buffer(files, method="median", tolerance=0.9,
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
          frame_fragments,_ = zip(*tqdm(pool.imap(FrameBufferIntegration((files, indices,
                                                                          array_shape, method)),
-                                                 range(chunks), initializer=initializer),
+                                                 range(chunks)),
                                        desc="Integrating files...", total=chunks))
 
     return np.concatenate(frame_fragments)
@@ -606,18 +606,17 @@ def get_raw_psf_maxima(files, original_psf_locs, edge_cut=2,
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
         raw_psf_maxima = (zip(*tqdm(pool.imap(RawPSFMaxima((files,
                                                             original_psf_locs,
                                                             edge_cut,
                                                             windowsize)),
-                                              range(len(files)),
-                                              initializer=initializer),
+                                              range(len(files))),
                                     total=len(files),
                                     desc="Measuring PSF maxima..."))
         )

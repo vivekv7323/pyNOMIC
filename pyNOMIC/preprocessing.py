@@ -1399,12 +1399,12 @@ def subtract_psfs(files, chops, stellar_temp,
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
 
         (max_x,
          max_y,
@@ -1415,8 +1415,8 @@ def subtract_psfs(files, chops, stellar_temp,
                                                         flats, wvl_interp, relative_flux,
                                                         windowsize, nbg, smooth, recur_iteration,
                                                         remove_trefoil, residual_handling)),
-                                        range(len(files)), initializer=initializer),
-                              total=len(files), desc="Subtracting PSFs"))
+                                        range(len(files))),
+                              total=len(files), desc="Subtracting PSFs..."))
 
     failcodes, reffits, lbtfits = (np.asarray(failcodes), np.asarray(reffits),
                                             np.asarray(lbtfits))
@@ -1427,7 +1427,7 @@ def subtract_psfs(files, chops, stellar_temp,
 
     if len(failed_indices) > 0:
         #if __name__ == "__main__":
-        with parallel_func(threadcount) as pool:
+        with parallel_func(threadcount, initializer=initializer) as pool:
     
             (new_max_x,
              new_max_y) = zip(*tqdm(pool.imap(PSFSubRedux((psf_subtracted_dir, files,
@@ -1436,8 +1436,8 @@ def subtract_psfs(files, chops, stellar_temp,
                                                            flats, wvl_interp, relative_flux,
                                                            windowsize, fit_reject_criterion,
                                                            nbg, smooth, residual_handling)),
-                                              failed_indices, initializer=initializer),
-                                    total=len(failed_indices), desc="Subtracting failed PSFs"))
+                                              failed_indices), total=len(failed_indices),
+                                    desc="Subtracting failed PSFs..."))
             
         maxima[failed_indices] = np.vstack((np.asarray(new_max_x), np.asarray(new_max_y))).T
 
@@ -1491,14 +1491,14 @@ def parallelized_chop_subtraction(files, chops, prefix='',
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
         offset_x, offset_y = zip(*tqdm(pool.imap(ChopSubtract((files, chops, chop_subtracted_dir)),
-                                                 range(len(files)), initializer=initializer),
+                                                 range(len(files))),
                                        total=len(files), desc = "Chop subtracting frames..."))
     # Get file paths
     chop_subtracted_files = sorted(list(pathlib.Path(str(chop_subtracted_dir)).rglob('*.fits')))
@@ -1675,12 +1675,12 @@ def chop_align(files, chops, maxima=None, offsets=None, channel_edges=[127, 255,
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
     
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
         (offset_x,
          offset_y,
          prefit_offset_x,
@@ -1695,7 +1695,7 @@ def chop_align(files, chops, maxima=None, offsets=None, channel_edges=[127, 255,
                                                         ref_index, nbg, edge_cut, smooth, 
                                                         search_rad, iterations, nan_mask_radius,
                                                         create_residual, save_file)),
-                                             range(len(files)), initializer=initializer),
+                                             range(len(files))),
                                    total=len(files), desc = "Aligning chop residuals..."))
 
     offsets = np.vstack((np.asarray(offset_x), np.asarray(offset_y))).T
@@ -1803,12 +1803,12 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
         
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
         (chopsub_stds,
          backsub_stds) = zip(*tqdm(pool.imap(SubtractBackground((subtracted_dir, raw_files,
                                                                  psf_subtracted_files, chops,
@@ -1819,7 +1819,7 @@ def subtract_background(raw_files, psf_subtracted_files, chops, channel_edges=[1
                                                                  flat_offsets, correction_method,
                                                                  channel_method, nbg, smooth,
                                                                  edge_cut)),
-                                             range(len(raw_files)), initializer=initializer),
+                                             range(len(raw_files))),
                                    total=len(raw_files), desc = "Subtracting backgrounds..."))
 
     return np.asarray(chopsub_stds), np.asarray(backsub_stds)
@@ -2080,13 +2080,13 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
 
     # Align the rest of the images
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
         offsets, imgfits = zip(*tqdm(pool.imap(RegisterFrames((files, subtracted_dir, aligned_dir,
                                                                badmap, starmask, padding,
                                                                center_padding, px, py, wx, wy,
@@ -2094,7 +2094,7 @@ def frame_registration(files, subtracted_dir, maxima=None, badmap=None, starmask
                                                                windowsize, alignment_method,
                                                                interp_method, actmax, 
                                                                boxcar, save_files)),
-                                               range(len(files))[2:], initializer=initializer),
+                                               range(len(files))[2:]),
                                      total=len(files) - 2, desc="Aligning frames..."))
 
     # Include first two frame offsets
@@ -2172,16 +2172,16 @@ def mask_files(files, directory, locs, array_shape, nbg=1,
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
 
     #if __name__ == "__main__":
-    with parallel_func(threadcount) as pool:
+    with parallel_func(threadcount, initializer=initializer) as pool:
         results = zip(*tqdm(pool.imap(hf.MaskFrames((files, directory, locs, array_shape,
                                                      nbg, nan_mask_radius)),
-                                      range(len(files)), initializer=initializer),
-                            total=len(files), desc="Masking files"))
+                                      range(len(files))), total=len(files),
+                            desc="Masking files..."))
 
     masked_files = sorted(list(pathlib.Path(directory).rglob('*.fits')))
     masked_files = np.asarray([a for a in masked_files if a.name[0]!='.'\

@@ -429,7 +429,7 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
 
@@ -458,15 +458,14 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
             chopb_integrated = stacks["arr_1"]
             
         #if __name__ == "__main__":
-        with parallel_func(threadcount) as pool:
+        with parallel_func(threadcount, initializer=initializer) as pool:
             (psfmaxima, background_dev, psf_dev, correlations,
              residual_dev, lbtfits, reffits, images) =\
              zip(*tqdm(pool.imap(EvaluateFrames((aligned_files, chopa_integrated, chopb_integrated,
                                                  wx, wy, windowsize, array_shape, wvl_interp,
                                                  relative_flux, model_trefoil, model_ghost,
                                                  subtract_psf, psf_subtracted_dir)),
-                                 np.array((chops, np.arange(len(aligned_files)))).T,
-                                 initializer=initializer),
+                                 np.array((chops, np.arange(len(aligned_files)))).T),
                        total=len(aligned_files), desc="Evaluating frames..."))
         
     else:
@@ -513,14 +512,14 @@ def frame_evaluation(aligned_files, chops, array_shape, file_size, stellar_temp,
             chopb_integrated = stacks["arr_1"]
 
         #if __name__ == "__main__":
-        with parallel_func(threadcount) as pool:
+        with parallel_func(threadcount, initializer=initializer) as pool:
             (psfmaxima, background_dev, psf_dev, correlations,
              residual_dev, lbtfits, reffits, images) =\
              zip(*tqdm(pool.imap(EvaluateFrames((None, chopa_integrated, chopb_integrated, wx, wy,
                                                  windowsize, array_shape, wvl_interp,
                                                  relative_flux, model_trefoil, model_ghost, 
                                                  subtract_psf, psf_subtracted_dir)),
-                                 np.array((chops, aligned_files)).T, initializer=initializer),
+                                 np.array((chops, aligned_files)).T),
                        total=len(aligned_files), desc="Evaluating frames..."))
 
     # Convert lists into numpy arrays
@@ -679,7 +678,7 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
 
@@ -689,16 +688,14 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
         binned_frames = np.zeros((numbinfiles, array_shape[0], array_shape[1]))
         
         #if __name__ == "__main__":
-        with parallel_func(threadcount) as pool:
+        with parallel_func(threadcount, initializer=initializer) as pool:
             a_binned_frames, a_binned_angles, a_binned_filenames =\
-            zip(*tqdm(pool.imap(BinFrames((array_shape, None)), zip(a_angles, a_binfiles),
-                                initializer=initializer)))
+            zip(*tqdm(pool.imap(BinFrames((array_shape, None)), zip(a_angles, a_binfiles))))
 
         #if __name__ == "__main__":
-        with parallel_func(threadcount) as pool:
+        with parallel_func(threadcount, initializer=initializer) as pool:
             b_binned_frames, b_binned_angles, b_binned_filenames =\
-            zip(*tqdm(pool.imap(BinFrames((array_shape, None)), zip(b_angles, b_binfiles),
-                                initializer=initializer)))
+            zip(*tqdm(pool.imap(BinFrames((array_shape, None)), zip(b_angles, b_binfiles))))
 
         # Sort filenames in order
         binned_filenames = np.asarray(sorted(a_binned_filenames+b_binned_filenames))
@@ -738,21 +735,19 @@ def frame_binning(aligned_files, chops, para_angles, frame_bool, array_shape, bi
     else:
             
         #if __name__ == "__main__":
-        with parallel_func(threadcount) as pool:
+        with parallel_func(threadcount, initializer=initializer) as pool:
             a_binned_angles, a_binned_filenames = zip(*tqdm(pool.imap(BinFrames((array_shape,
                                                                                  binned_dir)),
-                                                                      zip(a_angles, a_binfiles),
-                                                                      initializer=initializer)))
+                                                                      zip(a_angles, a_binfiles))))
             
         a_binned_angles, a_binned_filenames = (np.asarray(a_binned_angles),
                                                np.asarray(a_binned_filenames))
         
         #if __name__ == "__main__":
-        with parallel_func(threadcount) as pool:
+        with parallel_func(threadcount, initializer=initializer) as pool:
             b_binned_angles, b_binned_filenames = zip(*tqdm(pool.imap(BinFrames((array_shape,
                                                                                  binned_dir)),
-                                                                      zip(b_angles, b_binfiles),
-                                                                      initializer=initializer)))
+                                                                      zip(b_angles, b_binfiles))))
             
         b_binned_angles, b_binned_filenames = (np.asarray(b_binned_angles), 
                                                np.asarray(b_binned_filenames))
@@ -842,7 +837,7 @@ def psf_residual_evaluation(psfres_files, chops, array_shape, file_size,
         initializer = None
     elif parallel_mode == "processors":
         parallel_func = Pool
-        initializer = hf.ignore_warnings()
+        initializer = hf.ignore_warnings
     else:
         raise ValueError("Invalid parallelization method")
 
@@ -879,14 +874,14 @@ def psf_residual_evaluation(psfres_files, chops, array_shape, file_size,
                                                  (int(origin[1])-windowsize):(int(origin[1])+windowsize)]
             
         #if __name__ == "__main__":
-        with parallel_func(threadcount) as pool:
+        with parallel_func(threadcount, initializer=initializer) as pool:
             (corrs,
              pears,
              fluxdevs,
              maxfluxs) =\
             zip(*tqdm(pool.imap(EvaluatePSFResiduals((psfres_files, chopa_integrated_crop,
                                                       chopb_integrated_crop, windowsize, origin)),
-                                np.array((chops, np.arange(len(psfres_files)))).T, initializer=initializer),
+                                np.array((chops, np.arange(len(psfres_files)))).T),
                        total=len(psfres_files), desc="Evaluating PSF residuals..."))
         
     else:
@@ -939,14 +934,14 @@ def psf_residual_evaluation(psfres_files, chops, array_shape, file_size,
                                                  (int(origin[1])-windowsize):(int(origin[1])+windowsize)]
 
         #if __name__ == "__main__":
-        with parallel_func(threadcount) as pool:
+        with parallel_func(threadcount, initializer=initializer) as pool:
             (corrs,
              pears,
              fluxdevs,
              maxfluxs) =\
              zip(*tqdm(pool.imap(EvaluatePSFResiduals((None, chopa_integrated_crop,
                                                        chopb_integrated_crop, windowsize, origin)),
-                                 np.array((chops, psfres_files)).T, initializer=initializer),
+                                 np.array((chops, psfres_files)).T),
                        total=len(psfres_files), desc="Evaluating PSF residuals..."))
     
     return np.asarray(corrs), np.asarray(pears), np.asarray(fluxdevs), np.asarray(maxfluxs)
